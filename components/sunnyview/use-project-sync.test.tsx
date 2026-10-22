@@ -2,7 +2,12 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createProject, ProjectsApiError, updateProject } from "@/lib/projects-api";
-import { projectCreateErrorMessage, PROJECT_STORAGE_UNAVAILABLE_MESSAGE, useProjectSync } from "./use-project-sync";
+import {
+  projectCreateErrorMessage,
+  PROJECT_STORAGE_UNAVAILABLE_MESSAGE,
+  PROJECT_TEMPORARILY_UNAVAILABLE_MESSAGE,
+  useProjectSync,
+} from "./use-project-sync";
 import type { ProjectSyncInput } from "./use-project-sync";
 import { INITIAL_ESTIMATE } from "./estimate";
 
@@ -58,6 +63,14 @@ afterEach(() => {
 describe("projectCreateErrorMessage", () => {
   it("maps 503 to the storage message", () => {
     expect(projectCreateErrorMessage(new ProjectsApiError("x", 503))).toBe(PROJECT_STORAGE_UNAVAILABLE_MESSAGE);
+  });
+  it("maps the server not-configured 503 to the storage message", () => {
+    const err = new ProjectsApiError("Project backend is not configured.", 503);
+    expect(projectCreateErrorMessage(err)).toBe(PROJECT_STORAGE_UNAVAILABLE_MESSAGE);
+  });
+  it("maps the server temporarily-unavailable 503 to the retry message", () => {
+    const err = new ProjectsApiError("Project backend is temporarily unavailable. Please try again.", 503);
+    expect(projectCreateErrorMessage(err)).toBe(PROJECT_TEMPORARILY_UNAVAILABLE_MESSAGE);
   });
   it("keeps other API error messages", () => {
     expect(projectCreateErrorMessage(new ProjectsApiError("Too many", 429))).toBe("Too many");
@@ -201,5 +214,53 @@ describe("useProjectSync", () => {
       await vi.advanceTimersByTimeAsync(900);
     });
     expect(updateMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("useProjectSync transient create failures", () => {
+  const TRANSIENT = new ProjectsApiError("Project backend is temporarily unavailable. Please try again.", 503);
+
+  it("shows the temporary message and retries once on the next site, not on other edits", async () => {
+    createMock.mockRejectedValueOnce(TRANSIENT);
+    const setActionNotice = vi.fn();
+    const { result, rerender } = renderHook((p: ProjectSyncInput) => useProjectSync(p), {
+      initialProps: baseInput({ setActionNotice }),
+    });
+    await act(async () => {});
+    expect(result.current.projectError).toBe(PROJECT_TEMPORARILY_UNAVAILABLE_MESSAGE);
+    expect(setActionNotice).toHaveBeenCalledWith(PROJECT_TEMPORARILY_UNAVAILABLE_MESSAGE);
+
+    rerender(baseInput({ setActionNotice, tiltDeg: 30 }));
+    await act(async () => {});
+    expect(createMock).toHaveBeenCalledTimes(1);
+
+    createMock.mockResolvedValueOnce({ projectId: "p2", shareSlug: "s2" });
+    rerender(baseInput({ setActionNotice, lat: 40.7, lng: -74 }));
+    await act(async () => {});
+    expect(createMock).toHaveBeenCalledTimes(2);
+    expect(result.current).toMatchObject({ projectId: "p2", projectError: null });
+  });
+
+  it("does not retry a not-configured 503 on a new site", async () => {
+    createMock.mockRejectedValue(new ProjectsApiError("Project backend is not configured.", 503));
+    const { result, rerender } = renderHook((p: ProjectSyncInput) => useProjectSync(p), {
+      initialProps: baseInput(),
+    });
+    await act(async () => {});
+    expect(result.current.projectError).toBe(PROJECT_STORAGE_UNAVAILABLE_MESSAGE);
+    rerender(baseInput({ lat: 40.7, lng: -74 }));
+    await act(async () => {});
+    expect(createMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails again on the new site without looping", async () => {
+    createMock.mockRejectedValue(TRANSIENT);
+    const { rerender } = renderHook((p: ProjectSyncInput) => useProjectSync(p), { initialProps: baseInput() });
+    await act(async () => {});
+    rerender(baseInput({ lat: 40.7, lng: -74 }));
+    await act(async () => {});
+    rerender(baseInput({ lat: 40.7, lng: -74, tiltDeg: 25 }));
+    await act(async () => {});
+    expect(createMock).toHaveBeenCalledTimes(2);
   });
 });
