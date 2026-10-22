@@ -58,10 +58,14 @@ export function fallbackRectRoofPolygon(params: {
   heightPx: number
   zoom: number
   scale?: number | null
+  /** Map centre latitude. Needed so the rectangle is 14m x 9m on the ground (Mercator pixels shrink by cos(lat)). */
+  lat?: number | null
 }): NormPolygon {
   const resMPerPx = mercatorResolutionMetersPerPx(params.zoom)
   const s = typeof params.scale === "number" && Number.isFinite(params.scale) ? Math.max(1, Math.min(2, Math.round(params.scale))) : 2
-  const mPerPxOut = resMPerPx / s
+  // Without a usable latitude we keep the equatorial (cos = 1) resolution.
+  const cosLat = typeof params.lat === "number" && Number.isFinite(params.lat) && Math.abs(params.lat) < 90 ? Math.cos((params.lat * Math.PI) / 180) : 1
+  const mPerPxOut = (resMPerPx * cosLat) / s
   const roofWm = 14
   const roofHm = 9
   const wPx = Math.min(params.widthPx * 0.45, Math.max(30, roofWm / mPerPxOut))
