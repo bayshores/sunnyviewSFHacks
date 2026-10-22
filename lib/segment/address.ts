@@ -1,45 +1,4 @@
-function norm(s: string) {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .replace(/\s+/g, " ")
-}
-
-function normStreet(s: string) {
-  const tokens = norm(s).split(" ")
-  const expanded = tokens.map((t) => {
-    switch (t) {
-      case "st":
-        return "street"
-      case "rd":
-        return "road"
-      case "dr":
-        return "drive"
-      case "ave":
-        return "avenue"
-      case "blvd":
-        return "boulevard"
-      case "hwy":
-        return "highway"
-      case "pkwy":
-        return "parkway"
-      case "ln":
-        return "lane"
-      case "ct":
-        return "court"
-      case "pl":
-        return "place"
-      case "trl":
-        return "trail"
-      case "cir":
-        return "circle"
-      default:
-        return t
-    }
-  })
-  return expanded.join(" ").trim()
-}
+import { norm, normStreet } from "@/lib/geo/street"
 
 export type AddressHints = {
   raw: string
