@@ -27,6 +27,7 @@ export type OverpassElement = {
 
 type CacheEntry = { t: number; elements: OverpassElement[] }
 const MEM_TTL_MS = 10 * 60 * 1000
+const MEM_MAX_ENTRIES = 200
 
 function memCache() {
   const g = globalThis as unknown as { __sunnyviewOverpassCache?: Map<string, CacheEntry> }
@@ -34,69 +35,178 @@ function memCache() {
   return g.__sunnyviewOverpassCache
 }
 
-const OVERPASS_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-  "https://overpass.nchc.org.tw/api/interpreter",
-]
-
-function shouldRetryStatus(status: number) {
-  return status === 429 || status === 502 || status === 503 || status === 504
+function cacheSet(key: string, entry: CacheEntry) {
+  const mem = memCache()
+  mem.delete(key)
+  mem.set(key, entry)
+  while (mem.size > MEM_MAX_ENTRIES) {
+    const oldest = mem.keys().next().value
+    if (oldest === undefined) break
+    mem.delete(oldest)
+  }
 }
 
-async function fetchOverpassQuery(opts: { query: string; signal?: AbortSignal }) {
-  const key = `q:${opts.query}`
-  const now = Date.now()
-  const mem = memCache()
-  const hit = mem.get(key)
-  if (hit && now - hit.t < MEM_TTL_MS) return hit.elements
+// Public instances, most reliable first (see wiki.openstreetmap.org/wiki/Overpass_API).
+// overpass.kumi.systems is now an alias of overpass.private.coffee; overpass.nchc.org.tw is gone.
+const DEFAULT_OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+]
 
-  let lastErr: Error | null = null
+// Overpass operators ban anonymous clients (406) and ask apps to identify themselves.
+const OVERPASS_USER_AGENT = "sunnyviewSFHacks/1.0 (+https://github.com/bayshores/sunnyviewSFHacks)"
 
-  for (let attempt = 0; attempt < OVERPASS_ENDPOINTS.length; attempt++) {
-    const base = OVERPASS_ENDPOINTS[attempt]
-    const url = new URL(base)
-    url.searchParams.set("data", opts.query)
+// Each query gets a bounded budget across endpoints; callers running several queries
+// (locateBuildings) pass a shared `deadline` so the total stays inside the route's budget.
+export const OVERPASS_ATTEMPT_TIMEOUT_MS = 6_000
+export const OVERPASS_QUERY_BUDGET_MS = 9_000
+// Attempts shorter than this are pointless for Overpass; stop instead of sending them.
+const OVERPASS_MIN_ATTEMPT_MS = 1_000
+// Operators ask clients to wait >= 30s after a 429/406 before retrying the same server.
+export const OVERPASS_COOLDOWN_MS = 30_000
+// Overloaded server (5xx or runtime-error remark): skip it briefly so the next query tries another.
+export const OVERPASS_SHORT_COOLDOWN_MS = 5_000
+const COOLDOWN_MAX_ENTRIES = 32
 
-    const ac = new AbortController()
-    const timeoutMs = 4500
-    const t = setTimeout(() => ac.abort(), timeoutMs)
-    const onAbort = () => ac.abort()
-    if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true })
+function cooldowns() {
+  const g = globalThis as unknown as { __sunnyviewOverpassCooldown?: Map<string, number> }
+  if (!g.__sunnyviewOverpassCooldown) g.__sunnyviewOverpassCooldown = new Map()
+  return g.__sunnyviewOverpassCooldown
+}
 
+function markCooldown(endpoint: string, ms: number) {
+  if (ms <= 0) return
+  const map = cooldowns()
+  map.delete(endpoint)
+  map.set(endpoint, Date.now() + ms)
+  while (map.size > COOLDOWN_MAX_ENTRIES) {
+    const oldest = map.keys().next().value
+    if (oldest === undefined) break
+    map.delete(oldest)
+  }
+}
+
+function isCoolingDown(endpoint: string) {
+  const until = cooldowns().get(endpoint)
+  return until !== undefined && until > Date.now()
+}
+
+function parseEndpointList(raw: string | undefined): string[] {
+  if (!raw) return []
+  const out: string[] = []
+  for (const part of raw.split(",")) {
+    const s = part.trim()
+    if (!s) continue
     try {
-      const res = await fetch(url.toString(), {
-        signal: ac.signal,
-        headers: { accept: "application/json" },
-        cache: "no-store",
-      })
-      if (!res.ok) {
-        const text = await res.text().catch(() => "")
-        const err = new Error(`Overpass failed (${res.status})${text ? `: ${text.slice(0, 120)}` : ""}`)
-        if (shouldRetryStatus(res.status)) {
-          lastErr = err
-          continue
-        }
-        throw err
-      }
-
-      const json = (await res.json().catch(() => null)) as any
-      const elements = Array.isArray(json?.elements) ? (json.elements as OverpassElement[]) : []
-      mem.set(key, { t: now, elements })
-      return elements
-    } catch (e) {
-      const err = e instanceof Error ? e : new Error("Overpass request failed")
-      lastErr = err
-      // Try next endpoint on fetch abort/network errors.
-      continue
-    } finally {
-      clearTimeout(t)
-      if (opts.signal) opts.signal.removeEventListener("abort", onAbort)
+      const u = new URL(s)
+      if (u.protocol === "https:" || u.protocol === "http:") out.push(u.toString())
+    } catch {
+      // ignore invalid entries
     }
   }
+  return out
+}
 
-  if (lastErr) throw lastErr
-  throw new Error("Overpass request failed")
+/** OVERPASS_URL (comma-separated) entries first, then the public defaults, de-duplicated. */
+function overpassEndpoints(): string[] {
+  return Array.from(new Set([...parseEndpointList(process.env.OVERPASS_URL), ...DEFAULT_OVERPASS_ENDPOINTS]))
+}
+
+function shouldRetryStatus(status: number) {
+  return status === 406 || status === 429 || status >= 500
+}
+
+/** 406/429: operator-requested backoff. 5xx: brief skip. Anything else: none. */
+function cooldownForStatus(status: number) {
+  if (status === 406 || status === 429) return OVERPASS_COOLDOWN_MS
+  return status >= 500 ? OVERPASS_SHORT_COOLDOWN_MS : 0
+}
+
+type AttemptResult =
+  | { ok: true; elements: OverpassElement[] }
+  | { ok: false; error: Error; retry: boolean; cooldownMs: number }
+
+async function attemptOverpass(endpoint: string, query: string, signal: AbortSignal): Promise<AttemptResult> {
+  const res = await fetch(endpoint, {
+    method: "POST",
+    signal,
+    headers: {
+      accept: "application/json, */*;q=0.5",
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+      "user-agent": OVERPASS_USER_AGENT,
+    },
+    body: new URLSearchParams({ data: query }).toString(),
+    cache: "no-store",
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => "")
+    const error = new Error(`Overpass failed (${res.status})${text ? `: ${text.slice(0, 120)}` : ""}`)
+    return { ok: false, error, retry: shouldRetryStatus(res.status), cooldownMs: cooldownForStatus(res.status) }
+  }
+  const json = (await res.json().catch(() => null)) as { elements?: unknown; remark?: unknown } | null
+  // Overpass reports server-side timeouts/out-of-memory as HTTP 200 with a runtime-error remark.
+  if (typeof json?.remark === "string" && /runtime error/i.test(json.remark)) {
+    const error = new Error(`Overpass runtime error: ${json.remark.slice(0, 120)}`)
+    return { ok: false, error, retry: true, cooldownMs: OVERPASS_SHORT_COOLDOWN_MS }
+  }
+  const elements = Array.isArray(json?.elements) ? (json.elements as OverpassElement[]) : []
+  return { ok: true, elements }
+}
+
+type OverpassQueryOpts = {
+  signal?: AbortSignal
+  /** Absolute time (ms since epoch) by which the query must finish; capped by OVERPASS_QUERY_BUDGET_MS. */
+  deadline?: number
+}
+
+async function fetchOverpassQuery(opts: OverpassQueryOpts & { query: string }) {
+  const key = `q:${opts.query}`
+  const hit = memCache().get(key)
+  if (hit && Date.now() - hit.t < MEM_TTL_MS) return hit.elements
+  if (opts.signal?.aborted) throw new Error("Overpass request aborted")
+
+  const deadline = Math.min(Date.now() + OVERPASS_QUERY_BUDGET_MS, opts.deadline ?? Infinity)
+  let lastErr: Error | null = null
+
+  for (const endpoint of overpassEndpoints()) {
+    if (isCoolingDown(endpoint)) continue
+    const remaining = deadline - Date.now()
+    if (remaining < OVERPASS_MIN_ATTEMPT_MS) {
+      lastErr ??= new Error("Overpass time budget exhausted")
+      break
+    }
+
+    const ac = new AbortController()
+    const t = setTimeout(() => ac.abort(), Math.min(OVERPASS_ATTEMPT_TIMEOUT_MS, remaining))
+    const onAbort = () => ac.abort()
+    opts.signal?.addEventListener("abort", onAbort, { once: true })
+
+    let result: AttemptResult
+    try {
+      result = await attemptOverpass(endpoint, opts.query, ac.signal)
+    } catch (e) {
+      if (opts.signal?.aborted) throw new Error("Overpass request aborted")
+      // Per-attempt timeout (possibly cut short by the budget) or network error: try the next
+      // endpoint without a cooldown, so a slow burst cannot take every endpoint out of rotation.
+      const error = e instanceof Error ? e : new Error("Overpass request failed")
+      result = { ok: false, error, retry: true, cooldownMs: 0 }
+    } finally {
+      clearTimeout(t)
+      opts.signal?.removeEventListener("abort", onAbort)
+    }
+
+    if (result.ok) {
+      cacheSet(key, { t: Date.now(), elements: result.elements })
+      return result.elements
+    }
+    // Bad query (non-retryable 4xx): another endpoint will not help.
+    if (!result.retry) throw result.error
+    lastErr = result.error
+    markCooldown(endpoint, result.cooldownMs)
+  }
+
+  throw lastErr ?? new Error("Overpass unavailable: all endpoints are cooling down")
 }
 
 export type BuildingCandidate = {
@@ -172,19 +282,21 @@ export async function fetchOverpassBuildings(opts: {
   lng: number
   radiusM: number
   signal?: AbortSignal
+  deadline?: number
 }): Promise<OverpassElement[]> {
   const q = `[out:json][timeout:10];nwr["building"](around:${Math.round(opts.radiusM)},${opts.lat},${opts.lng});out tags geom;`
-  return await fetchOverpassQuery({ query: q, signal: opts.signal })
+  return await fetchOverpassQuery({ query: q, signal: opts.signal, deadline: opts.deadline })
 }
 
 export async function fetchOverpassByOsmId(opts: {
   osmType: "way" | "relation"
   osmId: number
   signal?: AbortSignal
+  deadline?: number
 }): Promise<OverpassElement[]> {
   const typ = opts.osmType
   const q = `[out:json][timeout:10];${typ}(${opts.osmId});out tags geom;`
-  return await fetchOverpassQuery({ query: q, signal: opts.signal })
+  return await fetchOverpassQuery({ query: q, signal: opts.signal, deadline: opts.deadline })
 }
 
 export async function fetchOverpassByHouseNumber(opts: {
@@ -193,12 +305,13 @@ export async function fetchOverpassByHouseNumber(opts: {
   radiusM: number
   houseNumber: string
   signal?: AbortSignal
+  deadline?: number
 }): Promise<OverpassElement[]> {
   const hn = opts.houseNumber.replace(/"/g, "")
   const q =
     `[out:json][timeout:10];nwr["building"]["addr:housenumber"="${hn}"]` +
     `(around:${Math.round(opts.radiusM)},${opts.lat},${opts.lng});out tags geom;`
-  return await fetchOverpassQuery({ query: q, signal: opts.signal })
+  return await fetchOverpassQuery({ query: q, signal: opts.signal, deadline: opts.deadline })
 }
 
 function looksResidential(hints: AddressHints | null) {
