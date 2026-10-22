@@ -1,8 +1,14 @@
 import { NextResponse } from "next/server"
 
+import { requestClientKey, takeRateLimitToken } from "@/lib/rate-limit"
+import { readCappedJson } from "@/lib/request-guards"
+
 export const runtime = "nodejs"
 
 const TIMEOUT_MS = 3500
+const MAX_BODY_BYTES = 4 * 1024
+const RATE_LIMIT_WINDOW_MS = 60_000
+const RATE_LIMIT_MAX = 20
 
 function looksLikeGeminiKey(value: string) {
   const raw = value.trim()
@@ -11,11 +17,31 @@ function looksLikeGeminiKey(value: string) {
 }
 
 export async function POST(req: Request) {
+  const clientKey = requestClientKey(req.headers)
+  const rate = takeRateLimitToken({
+    key: `gemini-validate:${clientKey}`,
+    limit: RATE_LIMIT_MAX,
+    windowMs: RATE_LIMIT_WINDOW_MS,
+  })
+  if (!rate.ok) {
+    return NextResponse.json(
+      { error: "Too many key validation requests. Please slow down." },
+      {
+        status: 429,
+        headers: { "retry-after": String(rate.retryAfterSec) },
+      }
+    )
+  }
+
   // Quick online validation (small, cheap request).
   const envKey = process.env.GEMINI_API_KEY?.trim() || ""
   const envLoaded = envKey.length > 0
   const headerKey = req.headers.get("x-gemini-api-key") ?? ""
-  const body = await req.json().catch(() => ({}))
+  const raw = await readCappedJson(req, MAX_BODY_BYTES)
+  if (!raw.ok && raw.status === 413) {
+    return NextResponse.json({ error: "Request body is too large" }, { status: 413 })
+  }
+  const body = raw.ok ? raw.body : {}
   const bodyKeyRaw = (body as any)?.geminiApiKey ?? (body as any)?.apiKey
   const bodyKey = typeof bodyKeyRaw === "string" ? bodyKeyRaw : ""
   const key = (headerKey || bodyKey).trim()
