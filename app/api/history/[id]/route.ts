@@ -4,7 +4,7 @@ import { z } from "zod"
 import { attachVisitorCookie, getOrCreateVisitorContext } from "@/lib/history-visitor"
 import { logHistoryDbError, mapHistoryDbError } from "@/lib/history-db-errors"
 import { deleteHistoryEntry, getHistoryEntry, patchHistoryMetadata } from "@/lib/history-store"
-import { getMongoDb } from "@/lib/mongo"
+import { connectMongo, mongoConnectMessage } from "@/lib/mongo-connect"
 import { readCappedJson } from "@/lib/request-guards"
 import { requestClientKey, takeRateLimitToken } from "@/lib/rate-limit"
 
@@ -56,10 +56,12 @@ export async function GET(req: NextRequest, ctx: RouteContext) {
 
   const visitor = getOrCreateVisitorContext(req)
   const id = await routeId(ctx)
-  const db = await getMongoDb()
-  if (!db) {
-    return withVisitorCookie({ error: "History backend is not configured." }, visitor, { status: 503 })
+  const conn = await connectMongo()
+  if (!conn.ok) {
+    if (conn.reason === "unavailable") logHistoryDbError("connect", conn.error)
+    return withVisitorCookie({ error: mongoConnectMessage("History", conn.reason) }, visitor, { status: 503 })
   }
+  const db = conn.db
 
   try {
     const item = await getHistoryEntry({ db, visitorId: visitor.visitorId, id })
@@ -99,10 +101,12 @@ export async function PATCH(req: NextRequest, ctx: RouteContext) {
     return withVisitorCookie({ error: "Invalid body", issues: parsed.error.issues }, visitor, { status: 400 })
   }
 
-  const db = await getMongoDb()
-  if (!db) {
-    return withVisitorCookie({ error: "History backend is not configured." }, visitor, { status: 503 })
+  const conn = await connectMongo()
+  if (!conn.ok) {
+    if (conn.reason === "unavailable") logHistoryDbError("connect", conn.error)
+    return withVisitorCookie({ error: mongoConnectMessage("History", conn.reason) }, visitor, { status: 503 })
   }
+  const db = conn.db
 
   try {
     const item = await patchHistoryMetadata({ db, visitorId: visitor.visitorId, id, patch: parsed.data })
@@ -134,10 +138,12 @@ export async function DELETE(req: NextRequest, ctx: RouteContext) {
 
   const visitor = getOrCreateVisitorContext(req)
   const id = await routeId(ctx)
-  const db = await getMongoDb()
-  if (!db) {
-    return withVisitorCookie({ error: "History backend is not configured." }, visitor, { status: 503 })
+  const conn = await connectMongo()
+  if (!conn.ok) {
+    if (conn.reason === "unavailable") logHistoryDbError("connect", conn.error)
+    return withVisitorCookie({ error: mongoConnectMessage("History", conn.reason) }, visitor, { status: 503 })
   }
+  const db = conn.db
 
   try {
     const ok = await deleteHistoryEntry({ db, visitorId: visitor.visitorId, id })

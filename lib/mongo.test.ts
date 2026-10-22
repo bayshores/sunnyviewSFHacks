@@ -4,12 +4,14 @@ const state = vi.hoisted(() => ({
   connect: vi.fn(),
   db: vi.fn(),
   ctor: vi.fn(),
+  options: vi.fn(),
 }))
 
 vi.mock("mongodb", () => ({
   MongoClient: class {
-    constructor(uri: string) {
+    constructor(uri: string, options?: unknown) {
       state.ctor(uri)
+      state.options(options)
     }
     connect() {
       return state.connect()
@@ -27,6 +29,7 @@ beforeEach(() => {
   state.connect.mockReset()
   state.db.mockReset()
   state.ctor.mockReset()
+  state.options.mockReset()
   vi.stubEnv("MONGODB_URI", "")
   vi.stubEnv("MONGODB_DB", "")
 })
@@ -61,6 +64,15 @@ describe("mongo", () => {
     await expect(getMongoClient()).rejects.toThrow("down")
     expect(await getMongoClient()).toEqual({ ok: true })
     expect(state.ctor).toHaveBeenCalledTimes(2)
+  })
+
+  it("uses short connection timeouts so an unreachable cluster fails fast", async () => {
+    vi.stubEnv("MONGODB_URI", "mongodb://a")
+    state.connect.mockResolvedValue({ ok: true })
+    await getMongoClient()
+    expect(state.options).toHaveBeenCalledWith(
+      expect.objectContaining({ serverSelectionTimeoutMS: 5_000, connectTimeoutMS: 5_000 })
+    )
   })
 
   it("selects the default or configured database", async () => {

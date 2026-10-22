@@ -4,7 +4,7 @@ import { z } from "zod"
 import { getOrCreateVisitorContext, attachVisitorCookie } from "@/lib/history-visitor"
 import { logHistoryDbError, mapHistoryDbError } from "@/lib/history-db-errors"
 import { upsertHistoryEntry, listHistoryEntries } from "@/lib/history-store"
-import { getMongoDb } from "@/lib/mongo"
+import { connectMongo, mongoConnectMessage } from "@/lib/mongo-connect"
 import { readCappedJson } from "@/lib/request-guards"
 import { requestClientKey, takeRateLimitToken } from "@/lib/rate-limit"
 
@@ -106,10 +106,12 @@ export async function GET(req: NextRequest) {
     return withVisitorCookie({ error: "Invalid query", issues: parsed.error.issues }, visitor, { status: 400 })
   }
 
-  const db = await getMongoDb()
-  if (!db) {
-    return withVisitorCookie({ error: "History backend is not configured." }, visitor, { status: 503 })
+  const conn = await connectMongo()
+  if (!conn.ok) {
+    if (conn.reason === "unavailable") logHistoryDbError("connect", conn.error)
+    return withVisitorCookie({ error: mongoConnectMessage("History", conn.reason) }, visitor, { status: 503 })
   }
+  const db = conn.db
 
   try {
     const items = await listHistoryEntries({ db, visitorId: visitor.visitorId, limit: parsed.data.limit })
@@ -150,10 +152,12 @@ export async function POST(req: NextRequest) {
     return withVisitorCookie({ error: "Snapshot and summary location mismatch." }, visitor, { status: 400 })
   }
 
-  const db = await getMongoDb()
-  if (!db) {
-    return withVisitorCookie({ error: "History backend is not configured." }, visitor, { status: 503 })
+  const conn = await connectMongo()
+  if (!conn.ok) {
+    if (conn.reason === "unavailable") logHistoryDbError("connect", conn.error)
+    return withVisitorCookie({ error: mongoConnectMessage("History", conn.reason) }, visitor, { status: 503 })
   }
+  const db = conn.db
 
   try {
     const entry = await upsertHistoryEntry({
