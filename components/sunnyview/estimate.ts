@@ -14,6 +14,40 @@ export function fallbackEstimateFor(dcKw: number): Estimate {
   return { ...fallbackAnnualEstimate(dcKw), source: "fallback" };
 }
 
+export type EstimateSite = {
+  lat: number | null;
+  lng: number | null;
+  tiltDeg: number;
+  azimuthDeg: number;
+  lossesPct: number;
+};
+
+/** Wildcard for the DC size: a saved snapshot estimate holds for any layout size on its site. */
+const ANY_DC_KW = "*";
+
+/** Key of the site assumptions an estimate depends on ("none" when there is no site). */
+export function estimateSiteKey(site: EstimateSite): string {
+  const { lat, lng, tiltDeg, azimuthDeg, lossesPct } = site;
+  if (lat === null || lng === null || !Number.isFinite(lat) || !Number.isFinite(lng)) return "none";
+  return [lat, lng, tiltDeg, azimuthDeg, lossesPct].join(",");
+}
+
+/** Key of all inputs sent to /api/estimate (site assumptions plus DC size). */
+export function estimateInputsKey(site: EstimateSite, dcKw: number | typeof ANY_DC_KW): string {
+  return `${estimateSiteKey(site)}|${dcKw}`;
+}
+
+/** Key for a saved (history) estimate: bound to its site, not to the re-packed DC size. */
+export function snapshotEstimateKey(site: EstimateSite): string {
+  return estimateInputsKey(site, ANY_DC_KW);
+}
+
+/** True when a server estimate was computed for the current inputs. */
+export function serverEstimateIsCurrent(est: Estimate, site: EstimateSite, dcKw: number): boolean {
+  if (est.source !== "server" || !est.inputsKey) return false;
+  return est.inputsKey === estimateInputsKey(site, dcKw) || est.inputsKey === snapshotEstimateKey(site);
+}
+
 /** Parse a /api/estimate body; null when annual totals are missing. */
 export function parseEstimateResponse(data: unknown): Estimate | null {
   const rec = asRecord(data);
