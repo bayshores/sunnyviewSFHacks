@@ -1,10 +1,31 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
 
+import { fetchArcgisImageryBase64 } from "@/lib/arcgis-imagery"
+import { requestClientKey, takeRateLimitToken } from "@/lib/rate-limit"
+import { isClearlyCrossSite, readCappedJson } from "@/lib/request-guards"
+import { spendBudgetResponse, takeSpendBudget } from "@/lib/spend-budget"
+
 export const runtime = "nodejs"
 
 const LOG_PREFIX = "[panel-recommend]"
 const MODEL_NOT_FOUND_RE = /not found|not supported|not available|unsupported model/i
+const RATE_LIMIT_WINDOW_MS = 60_000
+const RATE_LIMIT_MAX = 8
+const MAX_BODY_BYTES = 64 * 1024
+const ENRICHMENT_TIMEOUT_MS = 6500
+const GEMINI_TIMEOUT_MS = 25_000
+
+/** Returns the URL string only when it parses and uses https (blocks javascript:, data:, http:). */
+function httpsUrlOrNull(value: unknown): string | null {
+  if (typeof value !== "string") return null
+  try {
+    const url = new URL(value.trim())
+    return url.protocol === "https:" ? url.toString() : null
+  } catch {
+    return null
+  }
+}
 
 function clamp(n: number, min: number, max: number) {
   return Math.min(max, Math.max(min, n))
@@ -46,38 +67,6 @@ async function fetchClimateSummary(opts: { lat: number; lng: number; signal: Abo
     source: "open-meteo",
     avgDailyIrradianceKwhM2: avgIrr !== null ? Number(avgIrr.toFixed(2)) : null,
     avgCloudCoverPct: avgCloud !== null ? Math.round(clamp(avgCloud, 0, 100)) : null,
-  }
-}
-
-async function fetchStaticMapBase64(opts: {
-  origin: string
-  lat: number
-  lng: number
-  zoom?: number
-  signal: AbortSignal
-}) {
-  const url = new URL("/api/static-map", opts.origin)
-  url.searchParams.set("lat", String(opts.lat))
-  url.searchParams.set("lng", String(opts.lng))
-  url.searchParams.set("zoom", String(opts.zoom ?? 20))
-  url.searchParams.set("w", "520")
-  url.searchParams.set("h", "360")
-  url.searchParams.set("scale", "2")
-
-  const res = await fetch(url.toString(), {
-    signal: opts.signal,
-    headers: { accept: "image/*" },
-    cache: "no-store",
-  })
-  if (!res.ok) return null
-  const contentType = (res.headers.get("content-type") ?? "").split(";")[0] || "image/png"
-  if (!contentType.startsWith("image/")) return null
-  const buf = Buffer.from(await res.arrayBuffer())
-  if (!buf.byteLength) return null
-  return {
-    mimeType: contentType,
-    dataBase64: buf.toString("base64"),
-    note: "Satellite imagery centered on the address" as const,
   }
 }
 
@@ -168,11 +157,33 @@ function extractFirstJsonObject(s: string): any {
 }
 
 export async function POST(req: Request) {
-  const body = await req.json().catch(() => ({}))
+  const clientKey = requestClientKey(req.headers)
+  const rate = takeRateLimitToken({
+    key: `panel-recommend:${clientKey}`,
+    limit: RATE_LIMIT_MAX,
+    windowMs: RATE_LIMIT_WINDOW_MS,
+  })
+  if (!rate.ok) {
+    return NextResponse.json(
+      { error: "Too many panel recommendation requests. Please slow down." },
+      {
+        status: 429,
+        headers: { "retry-after": String(rate.retryAfterSec) },
+      }
+    )
+  }
+
+  const raw = await readCappedJson(req, MAX_BODY_BYTES)
+  if (!raw.ok && raw.status === 413) {
+    return NextResponse.json({ error: "Request body is too large" }, { status: 413 })
+  }
+  const body = raw.ok ? raw.body : {}
   const headerKey = req.headers.get("x-gemini-api-key")?.trim() || ""
   const bodyKeyRaw = (body as any)?.geminiApiKey ?? (body as any)?.apiKey
   const bodyKey = typeof bodyKeyRaw === "string" ? bodyKeyRaw.trim() : ""
-  const key = (process.env.GEMINI_API_KEY?.trim() || headerKey || bodyKey || "").trim()
+  const envKey = process.env.GEMINI_API_KEY?.trim() || ""
+  const key = (envKey || headerKey || bodyKey || "").trim()
+  const usingServerKey = envKey.length > 0 && key === envKey
   const modelsToTry = ["gemini-2.5-flash"]
 
   const parsed = BodySchema.safeParse(body)
@@ -183,10 +194,19 @@ export async function POST(req: Request) {
   const { lat, lng, roofAreaM2, options, currentId, notes } = parsed.data
   const loc = lat !== undefined && lng !== undefined ? `${lat.toFixed(5)}, ${lng.toFixed(5)}` : "unknown"
 
-  const origin = new URL(req.url).origin
-
   if (!key) {
     return NextResponse.json({ error: "Missing Gemini API key" }, { status: 401 })
+  }
+
+  if (usingServerKey) {
+    // The server's paid key must not be usable from other sites' pages, nor unbounded.
+    if (isClearlyCrossSite(req)) {
+      return NextResponse.json({ error: "Cross-site requests are not allowed." }, { status: 403 })
+    }
+    const budget = takeSpendBudget("gemini")
+    if (!budget.ok) {
+      return spendBudgetResponse(budget.retryAfterSec, "Panel recommendations are temporarily unavailable (daily limit reached).")
+    }
   }
 
   console.info(`${LOG_PREFIX} request`, {
@@ -213,11 +233,11 @@ export async function POST(req: Request) {
 
   if (lat !== undefined && lng !== undefined) {
     const ac = new AbortController()
-    const t = setTimeout(() => ac.abort(), 6500)
+    const t = setTimeout(() => ac.abort(), ENRICHMENT_TIMEOUT_MS)
     try {
       const [climateRes, mapRes] = await Promise.allSettled([
         fetchClimateSummary({ lat, lng, signal: ac.signal }),
-        fetchStaticMapBase64({ origin, lat, lng, zoom: 20, signal: ac.signal }),
+        fetchArcgisImageryBase64({ lat, lng, zoom: 20, w: 520, h: 360, scale: 2, signal: ac.signal }),
       ])
 
       if (climateRes.status === "fulfilled") {
@@ -294,18 +314,27 @@ No extra keys, no markdown.`
 
     let res: Response
     let json: any = null
+    const geminiAc = new AbortController()
+    const geminiTimeout = setTimeout(() => geminiAc.abort(), GEMINI_TIMEOUT_MS)
     try {
       res = await fetch(url.toString(), {
         method: "POST",
+        signal: geminiAc.signal,
         headers: { "content-type": "application/json" },
         body: JSON.stringify(requestBody),
       })
       json = (await res.json().catch(() => null)) as any
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Network error"
+      const message = geminiAc.signal.aborted
+        ? `Gemini request timed out after ${GEMINI_TIMEOUT_MS}ms`
+        : e instanceof Error
+          ? e.message
+          : "Network error"
       lastUpstreamError = message
       console.error(`${LOG_PREFIX} request failed`, { model: modelName, message })
       continue
+    } finally {
+      clearTimeout(geminiTimeout)
     }
 
     if (!res.ok) {
@@ -334,11 +363,11 @@ No extra keys, no markdown.`
     const selectedId = typeof out?.selectedId === "string" ? out.selectedId : null
     const brand = typeof out?.brand === "string" ? out.brand : null
     const model = typeof out?.model === "string" ? out.model : null
-    const outSourceUrl = typeof out?.sourceUrl === "string" ? out.sourceUrl : null
+    const outSourceUrl = httpsUrlOrNull(out?.sourceUrl)
     const why = Array.isArray(out?.why) ? out.why.map((v: any) => String(v)).filter(Boolean) : []
     const caveats = Array.isArray(out?.caveats) ? out.caveats.map((v: any) => String(v)).filter(Boolean) : []
 
-    const optionSourceUrl = selectedId ? options.find((o) => o.id === selectedId)?.sourceUrl ?? null : null
+    const optionSourceUrl = selectedId ? httpsUrlOrNull(options.find((o) => o.id === selectedId)?.sourceUrl) : null
     const sourceUrl = outSourceUrl || optionSourceUrl
 
     if (!selectedId || !allowedIds.has(selectedId) || !brand || !model || !sourceUrl) {
