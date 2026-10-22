@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 
 import { getOrCreateVisitorContext } from "@/lib/history-visitor"
-import { getMongoDb } from "@/lib/mongo"
+import { connectMongo, mongoConnectMessage } from "@/lib/mongo-connect"
 import { logProjectsDbError, mapProjectsDbError } from "@/lib/projects-db-errors"
 import {
-  PROJECTS_NOT_CONFIGURED,
   rateLimitResponse,
   readJsonBody,
   withVisitorCookie,
@@ -29,10 +28,12 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
 
   const visitor = getOrCreateVisitorContext(req)
   const { id } = await ctx.params
-  const db = await getMongoDb()
-  if (!db) {
-    return withVisitorCookie({ error: PROJECTS_NOT_CONFIGURED }, visitor, { status: 503 })
+  const conn = await connectMongo()
+  if (!conn.ok) {
+    if (conn.reason === "unavailable") logProjectsDbError("connect", conn.error)
+    return withVisitorCookie({ error: mongoConnectMessage("Project", conn.reason) }, visitor, { status: 503 })
   }
+  const db = conn.db
 
   try {
     const project = await getOwnedProject({ db, visitorId: visitor.visitorId, id })
@@ -70,10 +71,12 @@ export async function PATCH(req: NextRequest, ctx: RouteContext): Promise<NextRe
     return withVisitorCookie({ error: "Invalid body", issues: parsed.error.issues }, visitor, { status: 400 })
   }
 
-  const db = await getMongoDb()
-  if (!db) {
-    return withVisitorCookie({ error: PROJECTS_NOT_CONFIGURED }, visitor, { status: 503 })
+  const conn = await connectMongo()
+  if (!conn.ok) {
+    if (conn.reason === "unavailable") logProjectsDbError("connect", conn.error)
+    return withVisitorCookie({ error: mongoConnectMessage("Project", conn.reason) }, visitor, { status: 503 })
   }
+  const db = conn.db
 
   try {
     const project = await updateOwnedProject({ db, visitorId: visitor.visitorId, id, patch: parsed.data })
