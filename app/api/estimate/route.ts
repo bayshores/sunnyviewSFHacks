@@ -3,8 +3,10 @@ import { z } from "zod"
 
 import { co2KgPerKwh } from "@/lib/co2"
 import { callPVWatts } from "@/lib/pvwatts"
+import { readCappedJson } from "@/lib/request-guards"
 import { requestClientKey, takeRateLimitToken } from "@/lib/rate-limit"
 import { getRedis } from "@/lib/redis"
+import { FALLBACK_KWH_PER_KW_YEAR, fallbackAnnualEstimate } from "@/lib/solar-defaults"
 
 export const runtime = "nodejs"
 
@@ -64,16 +66,14 @@ function cacheKey(p: { lat: number; lng: number; tilt: number; az: number; dcKw:
 }
 
 function fallbackEstimate(params: { dcKw: number; lat?: number; lng?: number; reason: string }): EstimateOut {
-  const localKwhPerKwYear = 1400
-  const annualKwh = Math.max(0, params.dcKw) * localKwhPerKwYear
-  const annualCo2Kg = annualKwh * co2KgPerKwh(params.lat, params.lng)
+  const est = fallbackAnnualEstimate(params.dcKw, co2KgPerKwh(params.lat, params.lng))
   return {
-    annualKwh,
-    monthlyKwh: Array.from({ length: 12 }, () => annualKwh / 12),
-    annualCo2Kg,
-    assumptions: { source: params.reason, localKwhPerKwYear },
+    ...est,
+    assumptions: { source: params.reason, localKwhPerKwYear: FALLBACK_KWH_PER_KW_YEAR },
   }
 }
+
+const MAX_BODY_BYTES = 16_384
 
 export async function POST(req: Request) {
   const clientKey = requestClientKey(req.headers)
@@ -92,8 +92,11 @@ export async function POST(req: Request) {
     )
   }
 
-  const body = await req.json().catch(() => ({}))
-  const parsed = EstimateSchema.safeParse(body)
+  const capped = await readCappedJson(req, MAX_BODY_BYTES)
+  if (!capped.ok && capped.status === 413) {
+    return NextResponse.json({ error: "Request body too large" }, { status: 413 })
+  }
+  const parsed = EstimateSchema.safeParse(capped.ok ? capped.body : {})
   if (!parsed.success) {
     return NextResponse.json({ error: "Invalid body", issues: parsed.error.issues }, { status: 400 })
   }
