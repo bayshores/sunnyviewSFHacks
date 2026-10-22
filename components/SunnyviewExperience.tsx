@@ -8,6 +8,7 @@ import { BackgroundScene } from "@/components/BackgroundScene";
 import { useIsMobile } from "@/hooks/use-mobile";
 import type { HistorySnapshot } from "@/lib/history-types";
 import { cn } from "@/lib/utils";
+import { INITIAL_ESTIMATE } from "@/components/sunnyview/estimate";
 import { historySaveSignature, historySummaryFromSnapshot } from "@/components/sunnyview/history";
 import { apiRequestsAreSameOrigin } from "@/components/sunnyview/local-keys";
 import { DesktopLayout, MobileLayout } from "@/components/sunnyview/layouts";
@@ -188,6 +189,7 @@ export function SunnyviewExperience() {
     layout.setPanelCountOverride(null);
     layout.setPanelsPacked([]);
     layout.setRoofAxisHintDeg(null);
+    layout.setEstimate(INITIAL_ESTIMATE);
     resetAutoPick();
     clearOutline(null, false);
     if (v.length < 3) layout.setClosed(false);
