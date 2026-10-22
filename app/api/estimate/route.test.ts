@@ -29,12 +29,14 @@ describe("POST /api/estimate", () => {
   beforeEach(() => {
     resetState()
     pv.mockReset()
+    vi.spyOn(console, "warn").mockImplementation(() => {})
     vi.stubEnv("CO2_KG_PER_KWH", "")
     vi.stubEnv("UPSTASH_REDIS_REST_URL", "")
     vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "")
   })
   afterEach(() => {
     vi.unstubAllEnvs()
+    vi.restoreAllMocks()
     resetState()
   })
 
@@ -95,6 +97,34 @@ describe("POST /api/estimate", () => {
     const json = await res.json()
     expect(json.assumptions.source).toBe("fallback_after_pvwatts_error")
     expect(json.annualKwh).toBe(7000)
+  })
+
+  it("falls back without calling upstream when PVWATTS_API_KEY is missing", async () => {
+    const actual = await vi.importActual<typeof import("@/lib/pvwatts")>("@/lib/pvwatts")
+    pv.mockImplementation(actual.callPVWatts)
+    vi.stubEnv("PVWATTS_API_KEY", "")
+    const fetchSpy = vi.fn()
+    vi.stubGlobal("fetch", fetchSpy)
+    try {
+      const res = await POST(req(body()))
+      expect(res.status).toBe(200)
+      const json = await res.json()
+      expect(json.assumptions.source).toBe("fallback_after_pvwatts_error")
+      expect(json.annualKwh).toBe(7000)
+      expect(fetchSpy).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it("logs a concise warning without secrets when falling back", async () => {
+    vi.stubEnv("PVWATTS_API_KEY", "secret-key")
+    pv.mockRejectedValue(new Error("PVWatts error 503: down"))
+    await POST(req(body()))
+    expect(console.warn).toHaveBeenCalledWith("[estimate] pvwatts failed, using fallback", {
+      message: "PVWatts error 503: down",
+    })
+    expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain("secret-key")
   })
 
   it("429s after 40 requests", async () => {
