@@ -400,7 +400,8 @@ export async function callPVWatts(params: {
   const key = process.env.PVWATTS_API_KEY!;
   if (!key) throw new Error("Missing PVWATTS_API_KEY");
 
-  const url = new URL("https://developer.nrel.gov/api/pvwatts/v6.json");
+  // NREL is now NLR (Dec 2025); the live code uses PVWatts v8 at developer.nlr.gov.
+  const url = new URL("https://developer.nlr.gov/api/pvwatts/v8.json");
   url.searchParams.set("api_key", key);
   url.searchParams.set("lat", String(params.lat));
   url.searchParams.set("lon", String(params.lon));
