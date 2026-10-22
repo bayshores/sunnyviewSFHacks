@@ -140,6 +140,7 @@ function rectFallback(values: MetaValues & { zoom: number; widthPx: number; heig
     heightPx: values.heightPx,
     zoom: values.zoom,
     scale: values.staticScale,
+    lat: values.lat,
   })
   return ok({ roofPolygon, source: "fallback_rect", confidence: 0.15, note, ...extra })
 }
