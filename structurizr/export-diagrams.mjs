@@ -1,5 +1,6 @@
 import http from "node:http";
 import path from "node:path";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs/promises";
 
@@ -14,9 +15,38 @@ const STRUCTURIZR_OUT_DIR = path.join(REPO_ROOT, "structurizr", "out");
 const DIAGRAMS_OUT_DIR = path.join(REPO_ROOT, "structurizr", "diagrams");
 const LOGO_PATH = path.join(REPO_ROOT, "sunnyviewlogo.svg");
 
-const CHROME_BIN =
-  process.env.CHROME_BIN ||
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+function windowsBrowserCandidates(programFilesDir, fallbackDir) {
+  const base = programFilesDir || fallbackDir;
+  return [
+    path.join(base, "Google", "Chrome", "Application", "chrome.exe"),
+    path.join(base, "Microsoft", "Edge", "Application", "msedge.exe"),
+  ];
+}
+
+// Common browser locations, checked in order when CHROME_BIN is not set.
+const BROWSER_CANDIDATES = [
+  // macOS
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/Applications/Chromium.app/Contents/MacOS/Chromium",
+  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+  // Windows
+  ...windowsBrowserCandidates(process.env.ProgramFiles, "C:\\Program Files"),
+  ...windowsBrowserCandidates(process.env["ProgramFiles(x86)"], "C:\\Program Files (x86)"),
+  // Linux
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser",
+];
+
+/** CHROME_BIN wins; otherwise the first installed candidate, or null when none exists. */
+function resolveChromeBin() {
+  const fromEnv = process.env.CHROME_BIN?.trim();
+  if (fromEnv) return fromEnv;
+  return BROWSER_CANDIDATES.find((candidate) => existsSync(candidate)) ?? null;
+}
+
+const CHROME_BIN = resolveChromeBin();
 
 const OUTPUT_WIDTH = Number.parseInt(process.env.DIAGRAM_WIDTH ?? "1920", 10);
 const OUTPUT_HEIGHT = Number.parseInt(process.env.DIAGRAM_HEIGHT ?? "1080", 10);
@@ -101,6 +131,12 @@ async function main() {
     );
   }
 
+  if (!CHROME_BIN) {
+    throw new Error(
+      "Chrome, Chromium, or Microsoft Edge not found. Install one of them or set CHROME_BIN to the browser executable path."
+    );
+  }
+
   if (!(await pathExists(CHROME_BIN))) {
     throw new Error(
       `Chrome not found at ${CHROME_BIN}. Set CHROME_BIN to your Chrome executable path.`
@@ -151,15 +187,10 @@ async function main() {
 
     await page.waitForFunction(
       () =>
-        // eslint-disable-next-line no-undef
         typeof window !== "undefined" &&
-        // eslint-disable-next-line no-undef
         window.structurizr &&
-        // eslint-disable-next-line no-undef
         structurizr.diagram &&
-        // eslint-disable-next-line no-undef
         structurizr.diagram.getCurrentViewOrFilter &&
-        // eslint-disable-next-line no-undef
         structurizr.diagram.getCurrentViewOrFilter().key,
       { timeout: 60000 }
     );
@@ -188,14 +219,10 @@ async function main() {
           // but some versions of structurizr-util.js expect it for base64 encoding.
           // Patch in btoa/atob helpers so exportCurrentDiagramToPNG works.
           if (
-            // eslint-disable-next-line no-undef
             typeof CryptoJS === "undefined" &&
-            // eslint-disable-next-line no-undef
             typeof structurizr !== "undefined" &&
-            // eslint-disable-next-line no-undef
             structurizr.util
           ) {
-            // eslint-disable-next-line no-undef
             structurizr.util.btoa = function (plain) {
               const bytes = new TextEncoder().encode(String(plain));
               let bin = "";
@@ -205,7 +232,6 @@ async function main() {
               return btoa(bin);
             };
 
-            // eslint-disable-next-line no-undef
             structurizr.util.atob = function (encoded) {
               const bin = atob(String(encoded));
               const bytes = new Uint8Array(bin.length);
@@ -236,7 +262,6 @@ async function main() {
           if (existing) existing.remove();
 
           await new Promise((resolve) => {
-            // eslint-disable-next-line no-undef
             structurizr.diagram.changeView(viewKey, () => resolve());
           });
 
@@ -245,7 +270,6 @@ async function main() {
 
           // Export the diagram as SVG and crop it client-side.
           // This avoids canvas taint issues that can happen with SVG->PNG conversion.
-          // eslint-disable-next-line no-undef
           const rawSvg = structurizr.diagram.exportCurrentDiagramToSVG(false);
           const BG = "#05060A";
           const pad = Math.max(30, Math.round(outputWidth * 0.028));
@@ -473,7 +497,6 @@ async function main() {
         document.getElementById("opencode-export-root")?.remove();
       });
 
-      // eslint-disable-next-line no-console
       console.log(`Wrote ${path.relative(REPO_ROOT, outPath)}`);
     }
   } finally {
@@ -483,7 +506,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  // eslint-disable-next-line no-console
   console.error(err);
   process.exitCode = 1;
 });
