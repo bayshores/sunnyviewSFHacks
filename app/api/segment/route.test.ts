@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import { fallbackRectRoofPolygon } from "@/lib/segment/geometry"
 import { POST } from "./route"
 
 const g = globalThis as any
@@ -47,7 +48,7 @@ const DATA_URL = "data:image/png;base64,AAAA"
 
 type Handlers = {
   nominatim?: () => Response
-  overpass?: (query: string) => Response
+  overpass?: (query: string, url: string) => Response
   service?: (init: RequestInit, n: number) => Response | Promise<Response>
   image?: () => Response
 }
@@ -61,8 +62,8 @@ function install(h: Handlers) {
     const url = String(input)
     if (url.includes("nominatim.openstreetmap.org")) return h.nominatim ? h.nominatim() : json({})
     if (url.includes("/api/interpreter")) {
-      const query = new URL(url).searchParams.get("data") ?? ""
-      return h.overpass ? h.overpass(query) : json({ elements: [] })
+      const query = new URLSearchParams(String(init.body ?? "")).get("data") ?? ""
+      return h.overpass ? h.overpass(query, url) : json({ elements: [] })
     }
     if (url.endsWith("/segment")) {
       serviceCalls.push(JSON.parse(String(init.body)))
@@ -81,6 +82,7 @@ beforeEach(() => {
   }
   delete g.__sunnyviewRateLimitBuckets
   delete g.__sunnyviewOverpassCache
+  delete g.__sunnyviewOverpassCooldown
   delete g.__sunnyviewLocalSegmenterCache
   fetchMock = vi.fn()
   vi.stubGlobal("fetch", fetchMock)
@@ -245,6 +247,15 @@ describe("POST /api/segment without a segmentation service", () => {
     // rectangle is centred in the image
     const xs = ring.map((p) => p[0])
     expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(0.5, 6)
+    // matches the helper given the same meta, including latitude
+    const expected = fallbackRectRoofPolygon({
+      widthPx: META.widthPx,
+      heightPx: META.heightPx,
+      zoom: META.zoom,
+      scale: META.staticMap.scale,
+      lat: META.lat,
+    })
+    expect(body.roofPolygon).toEqual(expected)
   })
 
   it("keeps the fallback rectangle resilient to Overpass and Nominatim failures", async () => {
@@ -255,6 +266,130 @@ describe("POST /api/segment without a segmentation service", () => {
     const res = await post({ meta: META })
     expect(res.status).toBe(200)
     expect((await res.json()).source).toBe("fallback_rect")
+  })
+
+  describe("Nominatim footprint fallback", () => {
+    // Nominatim reverse hit carrying the same rectangle as building() as GeoJSON ([lon, lat]).
+    function nominatimHit(id: number, dLat = 0.0001, dLng = 0.00012, over: Record<string, unknown> = {}) {
+      const ring = building(id, LAT, LNG, dLat, dLng).geometry.map((p) => [p.lon, p.lat])
+      return {
+        osm_type: "way",
+        osm_id: id,
+        category: "building",
+        type: "house",
+        address: { house_number: "12", road: "Main Street" },
+        geojson: { type: "Polygon", coordinates: [ring] },
+        ...over,
+      }
+    }
+
+    it("uses the Nominatim footprint when Overpass is down", async () => {
+      install({ nominatim: () => json(nominatimHit(41)), overpass: () => json({}, 503) })
+      const res = await post({ meta: { ...META, address: "12 Main St, Town" } })
+      const body = await res.json()
+      expect(res.status).toBe(200)
+      expect(body.source).toBe("osm_building")
+      expect(body.confidence).toBe(0.8)
+      expect(body.debug).toMatchObject({ bestId: "nominatim:way:41", contains: true })
+      const ring = body.roofPolygon.coordinates[0] as number[][]
+      expect(ring).toHaveLength(4)
+      for (const [x, y] of ring) {
+        expect(x).toBeGreaterThan(0.3)
+        expect(x).toBeLessThan(0.7)
+        expect(y).toBeGreaterThan(0.3)
+        expect(y).toBeLessThan(0.7)
+      }
+      // still exactly one Nominatim request
+      expect(fetchMock.mock.calls.filter((c) => String(c[0]).includes("nominatim")).length).toBe(1)
+    })
+
+    it("keeps fallback_rect when the Nominatim hit is not a building and Overpass is down", async () => {
+      install({
+        nominatim: () => json(nominatimHit(42, 0.0001, 0.00012, { category: "landuse", type: "residential" })),
+        overpass: () => json({}, 503),
+      })
+      expect((await (await post({ meta: META })).json()).source).toBe("fallback_rect")
+    })
+
+    it("keeps fallback_rect when the Nominatim footprint is implausibly large and Overpass is down", async () => {
+      install({ nominatim: () => json(nominatimHit(43, 0.001, 0.001)), overpass: () => json({}, 503) })
+      expect((await (await post({ meta: META })).json()).source).toBe("fallback_rect")
+    })
+
+    it("de-duplicates the Nominatim footprint against the same Overpass way", async () => {
+      install({
+        nominatim: () => json(nominatimHit(44)),
+        overpass: (q) =>
+          q.includes("way(44)")
+            ? json({ elements: [building(44, LAT, LNG)] })
+            : json({ elements: [building(44, LAT, LNG), building(45, LAT + 0.0006, LNG + 0.0006)] }),
+      })
+      const body = await (await post({ meta: META })).json()
+      expect(body.source).toBe("osm_building")
+      expect(body.debug.bestId).toBe("way:44")
+      // by-id and nearby Overpass results plus the Nominatim footprint collapse into one candidate
+      expect(body.candidates.map((c: any) => c.id)).toEqual(["way:44", "way:45"])
+    })
+
+    it("ranks a distinct Nominatim footprint together with Overpass buildings (containment wins)", async () => {
+      install({
+        nominatim: () => json(nominatimHit(46)),
+        overpass: (q) => (q.includes("way(46)") ? json({ elements: [] }) : json({ elements: [building(47, LAT + 0.0006, LNG + 0.0006)] })),
+      })
+      const body = await (await post({ meta: META })).json()
+      expect(body.source).toBe("osm_building")
+      // the footprint containing the focus point wins the ranking
+      expect(body.debug.bestId).toBe("nominatim:way:46")
+      expect(body.candidates.map((c: any) => c.id)).toEqual(["nominatim:way:46", "way:47"])
+    })
+  })
+
+  it("queries Overpass with a form-encoded POST and an identifying User-Agent", async () => {
+    install({ overpass: () => json({ elements: [building(71, LAT, LNG)] }) })
+    const body = await (await post({ meta: META })).json()
+    expect(body.source).toBe("osm_building")
+    const call = fetchMock.mock.calls.find((c) => String(c[0]).includes("/api/interpreter"))!
+    const init = call[1] as RequestInit
+    expect(String(call[0])).toBe("https://overpass-api.de/api/interpreter")
+    expect(init.method).toBe("POST")
+    const headers = new Headers(init.headers)
+    expect(headers.get("content-type")).toBe("application/x-www-form-urlencoded;charset=UTF-8")
+    expect(headers.get("user-agent")).toContain("sunnyviewSFHacks/1.0")
+    expect(new URLSearchParams(String(init.body)).get("data")).toContain("around:200")
+  })
+
+  it("falls back to the next Overpass endpoint when the main instance rejects the request", async () => {
+    const urls: string[] = []
+    install({
+      overpass: (_q, url) => {
+        urls.push(url)
+        return url.includes("overpass-api.de") ? new Response("Not Acceptable", { status: 406 }) : json({ elements: [building(81, LAT, LNG)] })
+      },
+    })
+    const body = await (await post({ meta: META })).json()
+    expect(body.source).toBe("osm_building")
+    expect(body.debug.bestId).toBe("way:81")
+    expect(urls).toEqual(["https://overpass-api.de/api/interpreter", "https://overpass.private.coffee/api/interpreter"])
+  })
+
+  it("tries OVERPASS_URL before the public instances", async () => {
+    const saved = process.env.OVERPASS_URL
+    process.env.OVERPASS_URL = "https://overpass.internal.test/api/interpreter"
+    try {
+      const urls: string[] = []
+      install({
+        overpass: (_q, url) => {
+          urls.push(url)
+          return json({ elements: [building(91, LAT, LNG)] })
+        },
+      })
+      const body = await (await post({ meta: META })).json()
+      expect(body.debug.bestId).toBe("way:91")
+      expect(urls[0]).toBe("https://overpass.internal.test/api/interpreter")
+    } finally {
+      if (saved === undefined) delete process.env.OVERPASS_URL
+      else process.env.OVERPASS_URL = saved
+    }
   })
 })
 
