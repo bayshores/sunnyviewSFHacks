@@ -1,6 +1,10 @@
 import { Db, MongoClient } from "mongodb"
 
 const DEFAULT_DB_NAME = "sunnyview"
+// Fail fast when the cluster is unreachable instead of waiting out the driver's
+// 30s default, which outlives typical serverless function limits.
+const SERVER_SELECTION_TIMEOUT_MS = 5_000
+const CONNECT_TIMEOUT_MS = 5_000
 
 type MongoCache = {
   uri: string
@@ -31,7 +35,10 @@ export async function getMongoClient(): Promise<MongoClient | null> {
 
   const g = globalMongoCache()
   if (!g.__sunnyviewMongoCache || g.__sunnyviewMongoCache.uri !== uri) {
-    const client = new MongoClient(uri)
+    const client = new MongoClient(uri, {
+      serverSelectionTimeoutMS: SERVER_SELECTION_TIMEOUT_MS,
+      connectTimeoutMS: CONNECT_TIMEOUT_MS,
+    })
     const clientPromise = client.connect().catch((err) => {
       if (g.__sunnyviewMongoCache?.uri === uri) {
         delete g.__sunnyviewMongoCache
