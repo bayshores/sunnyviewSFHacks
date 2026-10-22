@@ -235,3 +235,54 @@ describe("useExplainAndTalk runTalk", () => {
     expect(input.setActionNotice).toHaveBeenLastCalledWith("Text-to-speech failed (502)");
   });
 });
+
+describe("useExplainAndTalk stale text", () => {
+  const ok = () => Response.json({ bullets: ["A bullet"], caveat: "c" });
+  const render = () =>
+    renderHook((p: ExplainAndTalkInput) => useExplainAndTalk(p), { initialProps: makeInput() });
+
+  it("hides explain text once the site changes, and on clear", async () => {
+    fetchMock.mockImplementation(async () => ok());
+    const { result, rerender } = render();
+    await act(async () => {
+      await result.current.runExplain();
+    });
+    expect(result.current.explainText?.bullets).toEqual(["A bullet"]);
+
+    rerender(makeInput({ lat: 40.7, lng: -74 }));
+    expect(result.current.explainText).toBeNull();
+
+    rerender(makeInput());
+    expect(result.current.explainText?.bullets).toEqual(["A bullet"]);
+    rerender(makeInput({ lat: null, lng: null }));
+    expect(result.current.explainText).toBeNull();
+    rerender(makeInput());
+    expect(result.current.explainText).toBeNull();
+  });
+
+  it("hides explain text when the layout changes", async () => {
+    fetchMock.mockImplementation(async () => ok());
+    const { result, rerender } = render();
+    await act(async () => {
+      await result.current.runExplain();
+    });
+    rerender(makeInput({ panelCount: 0, dcKw: 0 }));
+    expect(result.current.explainText).toBeNull();
+  });
+
+  it("does not show a response that finishes after the site changed", async () => {
+    let resolve: (r: Response) => void = () => {};
+    fetchMock.mockImplementation(() => new Promise<Response>((r) => (resolve = r)));
+    const { result, rerender } = render();
+    let pending: Promise<void> = Promise.resolve();
+    act(() => {
+      pending = result.current.runExplain();
+    });
+    rerender(makeInput({ lat: 40.7, lng: -74 }));
+    await act(async () => {
+      resolve(ok());
+      await pending;
+    });
+    expect(result.current.explainText).toBeNull();
+  });
+});
