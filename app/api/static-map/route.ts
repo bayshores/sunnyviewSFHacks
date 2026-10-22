@@ -1,4 +1,7 @@
 import { NextRequest } from "next/server"
+import { clamp, MERCATOR_MAX_LAT, parseNum } from "@/lib/geo/math"
+import { buildArcgisImageryUrl } from "@/lib/arcgis-imagery"
+import { fetchEsriCandidates, fetchNominatimSearch, GeocoderHttpError } from "@/lib/geo/providers"
 import { requestClientKey, takeRateLimitToken } from "@/lib/rate-limit"
 
 export const runtime = "nodejs"
@@ -8,71 +11,46 @@ const RATE_LIMIT_WINDOW_MS = 60_000
 const RATE_LIMIT_MAX = 45
 const LOG_PREFIX = "[static-map]"
 
-function clamp(n: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, n))
-}
+const NOMINATIM_USER_AGENT = "sunnyviewSFHacks/1.0 (static-map proxy)"
 
-function parseNum(value: string | null) {
-  if (!value) return null
-  const n = Number(value)
-  return Number.isFinite(n) ? n : null
-}
+type LatLng = { lat: number; lng: number }
 
-function mercatorProject(lat: number, lng: number) {
-  const R = 6378137
-  const clampedLat = clamp(lat, -85.05112878, 85.05112878)
-  const x = (lng * Math.PI * R) / 180
-  const y = R * Math.log(Math.tan(Math.PI / 4 + (clampedLat * Math.PI) / 360))
-  return { x, y }
-}
-
-function mercatorResolutionMetersPerPx(zoom: number) {
-  const R = 6378137
-  const z = Math.round(clamp(zoom, 0, 22))
-  return (2 * Math.PI * R) / (256 * Math.pow(2, z))
-}
-
-async function geocodeAddressViaNominatim(address: string, signal: AbortSignal) {
-  const url = new URL("https://nominatim.openstreetmap.org/search")
-  url.searchParams.set("format", "json")
-  url.searchParams.set("limit", "1")
-  url.searchParams.set("addressdetails", "1")
-  url.searchParams.set("q", address)
-
-  const res = await fetch(url.toString(), {
-    signal,
-    headers: {
-      accept: "application/json",
-      "user-agent": "sunnyviewSFHacks/1.0 (static-map proxy)",
-    },
-  })
-  if (!res.ok) throw new Error(`Geocoding failed (${res.status})`)
-  const data = (await res.json().catch(() => null)) as any
-  const hit = Array.isArray(data) ? data[0] : null
-  const lat = hit ? Number(hit.lat) : NaN
-  const lng = hit ? Number(hit.lon) : NaN
+function requireLatLng(lat: number, lng: number): LatLng {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error("No geocoding results")
   return { lat, lng }
 }
 
-async function geocodeAddressViaEsri(address: string, signal: AbortSignal) {
-  const url = new URL(
-    "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
-  )
-  url.searchParams.set("f", "json")
-  url.searchParams.set("singleLine", address)
-  url.searchParams.set("maxLocations", "1")
-  url.searchParams.set("category", "Address")
-  url.searchParams.set("countryCode", "USA")
+// Provider HTTP failures surface as "Geocoding failed (status)" to keep the public error text stable.
+function asGeocodingFailure(e: unknown): unknown {
+  return e instanceof GeocoderHttpError ? new Error(`Geocoding failed (${e.status})`) : e
+}
 
-  const res = await fetch(url.toString(), { signal, headers: { accept: "application/json", "accept-language": "en" } })
-  if (!res.ok) throw new Error(`Geocoding failed (${res.status})`)
-  const data = (await res.json().catch(() => null)) as any
-  const cand = Array.isArray(data?.candidates) ? data.candidates[0] : null
-  const lat = Number(cand?.location?.y)
-  const lng = Number(cand?.location?.x)
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error("No geocoding results")
-  return { lat, lng }
+async function geocodeAddressViaNominatim(address: string, signal: AbortSignal): Promise<LatLng> {
+  try {
+    const hits = await fetchNominatimSearch({
+      q: address,
+      limit: 1,
+      signal,
+      userAgent: NOMINATIM_USER_AGENT,
+      format: "json",
+      dedupe: false,
+      acceptLanguage: null,
+    })
+    const hit = hits[0]
+    return requireLatLng(hit ? Number(hit.lat) : NaN, hit ? Number(hit.lon) : NaN)
+  } catch (e) {
+    throw asGeocodingFailure(e)
+  }
+}
+
+async function geocodeAddressViaEsri(address: string, signal: AbortSignal): Promise<LatLng> {
+  try {
+    const candidates = await fetchEsriCandidates({ q: address, limit: 1, signal })
+    const cand = candidates[0]
+    return requireLatLng(Number(cand?.location?.y), Number(cand?.location?.x))
+  } catch (e) {
+    throw asGeocodingFailure(e)
+  }
 }
 
 async function geocodeAddress(address: string, signal: AbortSignal) {
@@ -169,17 +147,6 @@ async function fetchUpstreamImage(url: URL, signal: AbortSignal): Promise<ImageF
   }
 }
 
-function buildArcgisStaticUrl(params: { bbox: string; outW: number; outH: number }) {
-  const url = new URL("https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export")
-  url.searchParams.set("bbox", params.bbox)
-  url.searchParams.set("bboxSR", "3857")
-  url.searchParams.set("imageSR", "3857")
-  url.searchParams.set("size", `${params.outW},${params.outH}`)
-  url.searchParams.set("format", "png32")
-  url.searchParams.set("f", "image")
-  return url
-}
-
 function buildMapboxStaticUrl(params: {
   lat: number
   lng: number
@@ -253,26 +220,20 @@ export async function GET(req: NextRequest) {
       return Response.json({ error: "Invalid coordinates." }, { status: 400 })
     }
 
-    lat = clamp(lat, -85.05112878, 85.05112878)
+    lat = clamp(lat, -MERCATOR_MAX_LAT, MERCATOR_MAX_LAT)
     lng = clamp(lng, -180, 180)
 
     const outW = clamp(w * scale, 64, 2048)
     const outH = clamp(h * scale, 64, 2048)
 
-    const { x, y } = mercatorProject(lat, lng)
-    const resMPerPx = mercatorResolutionMetersPerPx(zoom)
-    const halfWm = (resMPerPx * w) / 2
-    const halfHm = (resMPerPx * h) / 2
-    const bbox = `${(x - halfWm).toFixed(6)},${(y - halfHm).toFixed(6)},${(x + halfWm).toFixed(6)},${(y + halfHm).toFixed(6)}`
-
     let lastFailure: ImageFetchResult | null = null
     const arcgisAttempts = [
-      { outW, outH, label: `scale-${scale}` },
-      ...(scale > 1 ? [{ outW: w, outH: h, label: "scale-1-fallback" }] : []),
+      { scale, label: `scale-${scale}` },
+      ...(scale > 1 ? [{ scale: 1, label: "scale-1-fallback" }] : []),
     ]
 
     for (const attempt of arcgisAttempts) {
-      const url = buildArcgisStaticUrl({ bbox, outW: attempt.outW, outH: attempt.outH })
+      const url = buildArcgisImageryUrl({ lat, lng, zoom, w, h, scale: attempt.scale })
       const img = await fetchUpstreamImage(url, signal)
       if (img.ok) {
         console.info(`${LOG_PREFIX} success`, {
