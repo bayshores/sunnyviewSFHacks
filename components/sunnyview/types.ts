@@ -13,6 +13,8 @@ export type Estimate = {
   annualCo2Kg: number;
   source: "fallback" | "server";
   assumptions?: unknown;
+  /** Inputs a server estimate was computed for; see estimateInputsKey. Absent on fallbacks. */
+  inputsKey?: string;
 };
 
 export type CandidatePolygon = {
