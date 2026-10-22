@@ -1,3 +1,4 @@
+import { toFiniteNumber } from "@/lib/geo/math"
 import { parseAddressHints, scoreAddrMatch, type AddressHints } from "@/lib/segment/address"
 import {
   mercatorProject,
@@ -16,7 +17,7 @@ import {
 
 export type OverpassTagMap = Record<string, string>
 
-type OverpassElement = {
+export type OverpassElement = {
   type?: string
   id?: number
   tags?: Record<string, unknown>
@@ -110,11 +111,6 @@ export type BuildingCandidate = {
   score: number
 }
 
-function num(x: unknown) {
-  const n = typeof x === "number" ? x : typeof x === "string" ? Number(x) : NaN
-  return Number.isFinite(n) ? n : null
-}
-
 function toTags(t: Record<string, unknown> | undefined): OverpassTagMap {
   const out: OverpassTagMap = {}
   if (!t) return out
@@ -127,8 +123,8 @@ function toTags(t: Record<string, unknown> | undefined): OverpassTagMap {
 function latLonRingToMercator(ring: Array<{ lat?: unknown; lon?: unknown }>): Pt[] | null {
   const pts: Pt[] = []
   for (const p of ring) {
-    const lat = num(p.lat)
-    const lon = num(p.lon)
+    const lat = toFiniteNumber(p.lat)
+    const lon = toFiniteNumber(p.lon)
     if (lat === null || lon === null) return null
     const m = mercatorProject(lat, lon)
     pts.push({ x: m.x, y: m.y })

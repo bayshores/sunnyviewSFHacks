@@ -5,6 +5,7 @@ import { getOrCreateVisitorContext, attachVisitorCookie } from "@/lib/history-vi
 import { logHistoryDbError, mapHistoryDbError } from "@/lib/history-db-errors"
 import { upsertHistoryEntry, listHistoryEntries } from "@/lib/history-store"
 import { getMongoDb } from "@/lib/mongo"
+import { readCappedJson } from "@/lib/request-guards"
 import { requestClientKey, takeRateLimitToken } from "@/lib/rate-limit"
 
 export const runtime = "nodejs"
@@ -12,6 +13,7 @@ export const runtime = "nodejs"
 const RATE_LIMIT_WINDOW_MS = 60_000
 const LIST_RATE_LIMIT_MAX = 90
 const SAVE_RATE_LIMIT_MAX = 40
+const MAX_SAVE_BODY_BYTES = 250_000
 
 const ListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(100),
@@ -134,13 +136,11 @@ export async function POST(req: NextRequest) {
   }
 
   const visitor = getOrCreateVisitorContext(req)
-  const contentLength = Number(req.headers.get("content-length") ?? "")
-  if (Number.isFinite(contentLength) && contentLength > 250_000) {
+  const capped = await readCappedJson(req, MAX_SAVE_BODY_BYTES)
+  if (!capped.ok && capped.status === 413) {
     return withVisitorCookie({ error: "History payload is too large." }, visitor, { status: 413 })
   }
-
-  const body = await req.json().catch(() => null)
-  const parsed = SaveBodySchema.safeParse(body)
+  const parsed = SaveBodySchema.safeParse(capped.ok ? capped.body : null)
   if (!parsed.success) {
     return withVisitorCookie({ error: "Invalid body", issues: parsed.error.issues }, visitor, { status: 400 })
   }

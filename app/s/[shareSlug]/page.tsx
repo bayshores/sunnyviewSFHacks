@@ -5,83 +5,38 @@ import { useParams } from "next/navigation"
 import { useEffect, useMemo, useState } from "react"
 import { GlobeView } from "@/components/GlobeView"
 import { RoofCanvas } from "@/components/RoofCanvas"
-import type { PanelSpec, Point } from "@/components/PanelPacking"
+import type { PanelSpec } from "@/components/PanelPacking"
 import { packPanelsDeterministic } from "@/components/PanelPacking"
-import { apiUrl } from "@/lib/api"
+import { resolveSharedLayout } from "@/components/sunnyview/project-payload"
+import { getSharedProject, ProjectsApiError } from "@/lib/projects-api"
+import type { SharedProject } from "@/lib/projects-types"
+import { fallbackAnnualEstimate } from "@/lib/solar-defaults"
 import { buildStaticMapSpec } from "@/lib/static-map"
 
 const Globe = dynamic(() => Promise.resolve(GlobeView), { ssr: false })
-
-type Snapshot = {
-  siteSpec?: { lat?: number; lng?: number }
-  panelSpec?: Partial<PanelSpec>
-  layoutSummary?: { orientationDeg?: number }
-  geometry?: {
-    vertices?: Array<{ x: number; y: number }> | Array<[number, number]>
-    closed?: boolean
-    mPerPx?: number
-    background?: "address" | "image"
-    zoom?: number
-  }
-  estimate?: { annualKwh?: number; annualCo2Kg?: number; monthlyKwh?: number[] }
-}
-
-function coerceNumber(v: unknown): number | null {
-  const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : NaN
-  return Number.isFinite(n) ? n : null
-}
-
-function normalizeVertices(v: unknown): Point[] | null {
-  if (!Array.isArray(v)) return null
-  const pts: Point[] = []
-  for (const item of v) {
-    if (Array.isArray(item) && item.length >= 2) {
-      const x = coerceNumber(item[0])
-      const y = coerceNumber(item[1])
-      if (x === null || y === null) return null
-      pts.push({ x, y })
-      continue
-    }
-    if (item && typeof item === "object") {
-      const x = coerceNumber((item as any).x)
-      const y = coerceNumber((item as any).y)
-      if (x === null || y === null) return null
-      pts.push({ x, y })
-      continue
-    }
-    return null
-  }
-  return pts.length >= 3 ? pts : null
-}
 
 export default function SharePage() {
   const params = useParams<{ shareSlug: string }>()
   const shareSlug = String(params?.shareSlug ?? "")
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
+  const [notFound, setNotFound] = useState(false)
+  const [snapshot, setSnapshot] = useState<SharedProject | null>(null)
 
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       setLoading(true)
       setError(null)
+      setNotFound(false)
       try {
-        const res = await fetch(apiUrl(`/s/${encodeURIComponent(shareSlug)}`), {
-          method: "GET",
-          headers: { accept: "application/json" },
-        })
-        const ct = res.headers.get("content-type") ?? ""
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        if (!ct.includes("application/json")) {
-          throw new Error("Share endpoint did not return JSON. Set NEXT_PUBLIC_API_ORIGIN to your backend host.")
-        }
-        const data = (await res.json().catch(() => null)) as any
+        const project = await getSharedProject(shareSlug)
         if (cancelled) return
-        setSnapshot((data?.project ?? data) as Snapshot)
+        setSnapshot(project)
       } catch (e) {
         if (cancelled) return
-        setError(e instanceof Error ? e.message : "Failed to load share snapshot.")
+        if (e instanceof ProjectsApiError && e.status === 404) setNotFound(true)
+        else setError(e instanceof Error ? e.message : "Failed to load share snapshot.")
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -105,7 +60,7 @@ export default function SharePage() {
     [snapshot]
   )
 
-  const vertices = useMemo(() => normalizeVertices(snapshot?.geometry?.vertices) ?? [], [snapshot])
+  const vertices = useMemo(() => snapshot?.geometry?.vertices ?? [], [snapshot])
   const closed = snapshot?.geometry?.closed ?? true
   const mPerPx = snapshot?.geometry?.mPerPx ?? null
   const zoom = snapshot?.geometry?.zoom ?? 19
@@ -118,7 +73,7 @@ export default function SharePage() {
     return { kind: "none" as const }
   }, [lat, lng, snapshot?.geometry?.background, zoom])
 
-  const panels = useMemo(() => {
+  const packedPanels = useMemo(() => {
     if (!closed || vertices.length < 3 || !mPerPx) return []
     return packPanelsDeterministic({
       usablePolygon: vertices,
@@ -128,10 +83,15 @@ export default function SharePage() {
     })
   }, [closed, vertices, mPerPx, panelSpec.widthM, panelSpec.heightM, panelSpec.gapM, orientationDeg])
 
-  const panelCount = panels.length
-  const dcKw = (panelCount * panelSpec.wattW) / 1000
-  const annualKwh = snapshot?.estimate?.annualKwh ?? dcKw * 1400
-  const annualCo2Kg = snapshot?.estimate?.annualCo2Kg ?? annualKwh * 0.4
+  // Honor a manually reduced panel count / saved dcKw from the shared layoutSummary.
+  const layout = useMemo(
+    () => resolveSharedLayout(packedPanels, snapshot?.layoutSummary, panelSpec.wattW),
+    [packedPanels, snapshot?.layoutSummary, panelSpec.wattW]
+  )
+  const { panels, panelCount, dcKw } = layout
+  const fallback = fallbackAnnualEstimate(dcKw)
+  const annualKwh = snapshot?.estimate?.annualKwh ?? fallback.annualKwh
+  const annualCo2Kg = snapshot?.estimate?.annualCo2Kg ?? fallback.annualCo2Kg
 
   return (
     <div className="flex min-h-screen w-screen flex-col bg-background">
@@ -142,6 +102,12 @@ export default function SharePage() {
 
       <main className="mx-auto w-full max-w-7xl flex-1 p-5">
         {loading && <div className="text-sm text-muted-foreground">Loading…</div>}
+        {notFound && (
+          <div className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
+            <div className="font-medium text-foreground">Shared project not found</div>
+            <div className="mt-1">This link may be incorrect or the project may no longer be available.</div>
+          </div>
+        )}
         {error && (
           <div className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
             <div className="font-medium text-foreground">Couldn’t load share snapshot</div>
@@ -149,7 +115,7 @@ export default function SharePage() {
           </div>
         )}
 
-        {!loading && !error && (
+        {!loading && !error && !notFound && (
           <div className="grid gap-4 lg:grid-cols-2">
             <div className="space-y-4">
               <div className="grid gap-3 md:grid-cols-3">

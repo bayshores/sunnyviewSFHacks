@@ -1,5 +1,8 @@
 import { NextRequest } from "next/server"
 
+import { asRecord } from "@/lib/geo/narrow"
+import { clamp, MERCATOR_MAX_LAT, parseNum } from "@/lib/geo/math"
+import { fetchEsriReverseLabel, fetchNominatimReverse, GeocoderHttpError } from "@/lib/geo/providers"
 import { requestClientKey, takeRateLimitToken } from "@/lib/rate-limit"
 
 export const runtime = "nodejs"
@@ -19,16 +22,6 @@ type CacheEntry = { t: number; payload: ReverseOut }
 const CACHE_TTL_MS = 60_000
 const CACHE_MAX_ENTRIES = 500
 
-function clamp(n: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, n))
-}
-
-function parseNum(value: string | null) {
-  if (!value) return null
-  const n = Number(value)
-  return Number.isFinite(n) ? n : null
-}
-
 function cacheMap() {
   const g = globalThis as unknown as { __sunnyviewReverseGeocodeCache?: Map<string, CacheEntry> }
   if (!g.__sunnyviewReverseGeocodeCache) g.__sunnyviewReverseGeocodeCache = new Map()
@@ -44,6 +37,8 @@ function cacheGet(key: string) {
 
 function cacheSet(key: string, payload: ReverseOut) {
   const map = cacheMap()
+  // Delete first so a refreshed key moves to the end of the insertion order (oldest evicted first).
+  map.delete(key)
   map.set(key, { t: Date.now(), payload })
   if (map.size > CACHE_MAX_ENTRIES) {
     const oldestKey = map.keys().next().value
@@ -51,44 +46,17 @@ function cacheSet(key: string, payload: ReverseOut) {
   }
 }
 
-async function fetchEsriReverse(lat: number, lng: number, signal: AbortSignal): Promise<string | null> {
-  const url = new URL("https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/reverseGeocode")
-  url.searchParams.set("f", "json")
-  url.searchParams.set("location", `${lng},${lat}`)
-  url.searchParams.set("outSR", "4326")
-  url.searchParams.set("langCode", "EN")
+const NOMINATIM_USER_AGENT = "sunnyviewSFHacks/1.0 (reverse geocode proxy)"
 
-  const res = await fetch(url.toString(), {
-    signal,
-    headers: { accept: "application/json", "accept-language": "en" },
-  })
-  if (!res.ok) return null
-  const json = (await res.json().catch(() => null)) as any
-  const longLabel = typeof json?.address?.LongLabel === "string" ? json.address.LongLabel : null
-  const match = typeof json?.address?.Match_addr === "string" ? json.address.Match_addr : null
-  return (longLabel ?? match ?? null)?.trim() || null
-}
-
-async function fetchNominatimReverse(lat: number, lng: number, signal: AbortSignal): Promise<string | null> {
-  const url = new URL("https://nominatim.openstreetmap.org/reverse")
-  url.searchParams.set("format", "jsonv2")
-  url.searchParams.set("lat", String(lat))
-  url.searchParams.set("lon", String(lng))
-  url.searchParams.set("zoom", "18")
-  url.searchParams.set("addressdetails", "1")
-
-  const res = await fetch(url.toString(), {
-    signal,
-    headers: {
-      accept: "application/json",
-      "accept-language": "en",
-      "user-agent": "sunnyviewSFHacks/1.0 (reverse geocode proxy)",
-    },
-  })
-  if (!res.ok) return null
-  const json = (await res.json().catch(() => null)) as any
-  const displayName = typeof json?.display_name === "string" ? json.display_name : null
-  return displayName?.trim() || null
+async function nominatimReverseLabel(lat: number, lng: number, signal: AbortSignal): Promise<string | null> {
+  try {
+    const json = asRecord(await fetchNominatimReverse({ lat, lng, signal, userAgent: NOMINATIM_USER_AGENT }))
+    const displayName = typeof json?.display_name === "string" ? json.display_name : null
+    return displayName?.trim() || null
+  } catch (e) {
+    if (e instanceof GeocoderHttpError) return null
+    throw e
+  }
 }
 
 export async function GET(req: NextRequest) {
@@ -115,7 +83,7 @@ export async function GET(req: NextRequest) {
     return Response.json({ error: "Missing lat/lng" }, { status: 400 })
   }
 
-  const lat = clamp(latRaw, -85.05112878, 85.05112878)
+  const lat = clamp(latRaw, -MERCATOR_MAX_LAT, MERCATOR_MAX_LAT)
   const lng = clamp(lngRaw, -180, 180)
 
   const key = `rev:${lat.toFixed(5)}:${lng.toFixed(5)}`
@@ -125,15 +93,27 @@ export async function GET(req: NextRequest) {
   const ac = new AbortController()
   const timeoutId = setTimeout(() => ac.abort(), ROUTE_TIMEOUT_MS)
 
+  // Upstream failures (network errors, timeouts) fall through to the next provider
+  // and finally to a coordinate label, so the client never sees a raw 500.
+  let upstreamFailed = false
+  const tryLabel = async (lookup: () => Promise<string | null>) => {
+    try {
+      return await lookup()
+    } catch {
+      upstreamFailed = true
+      return null
+    }
+  }
+
   try {
-    const esri = await fetchEsriReverse(lat, lng, ac.signal)
+    const esri = await tryLabel(() => fetchEsriReverseLabel(lat, lng, ac.signal))
     if (esri) {
       const out: ReverseOut = { lat, lng, displayName: esri, provider: "esri" }
       cacheSet(key, out)
       return Response.json(out, { status: 200 })
     }
 
-    const nom = await fetchNominatimReverse(lat, lng, ac.signal)
+    const nom = await tryLabel(() => nominatimReverseLabel(lat, lng, ac.signal))
     if (nom) {
       const out: ReverseOut = { lat, lng, displayName: nom, provider: "nominatim" }
       cacheSet(key, out)
@@ -146,7 +126,8 @@ export async function GET(req: NextRequest) {
       displayName: `${lat.toFixed(6)}, ${lng.toFixed(6)}`,
       provider: "none",
     }
-    cacheSet(key, out)
+    // Don't cache a transient-failure result; a retry may succeed.
+    if (!upstreamFailed) cacheSet(key, out)
     return Response.json(out, { status: 200 })
   } finally {
     clearTimeout(timeoutId)

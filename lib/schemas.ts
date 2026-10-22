@@ -1,38 +1,84 @@
-import { z } from "zod";
+import { z } from "zod"
 
-export const SiteSpecSchema = z.object({
-  lat: z.number().optional(),
-  lng: z.number().optional(),
-  tiltDeg: z.number().default(20),
-  azimuthDeg: z.number().default(180),
-  lossesPct: z.number().default(14),
-});
+/**
+ * Zod schemas for the Projects feature (create / patch payloads).
+ * Bounds mirror the History SnapshotSchema.
+ */
 
-export const PanelSpecSchema = z.object({
-  lengthM: z.number().default(1.7),
-  widthM: z.number().default(1.1),
-  wattW: z.number().default(400),
-  gapM: z.number().default(0.02),
-  setbackM: z.number().default(0.3),
-});
+const finite = z.number().finite()
 
-export const ProjectCreateSchema = z.object({
-  title: z.string().default("Untitled"),
-  baseImage: z.object({
-    kind: z.enum(["upload", "tile"]),
-    url: z.string().optional(),
-    objectKey: z.string().optional(),
-    sha256: z.string().optional(),
-  }),
-  siteSpec: SiteSpecSchema.optional(),
-  panelSpec: PanelSpecSchema.optional(),
-});
+export const ProjectSiteSpecSchema = z
+  .object({
+    lat: finite.min(-90).max(90),
+    lng: finite.min(-180).max(180),
+    tiltDeg: finite.min(0).max(90),
+    azimuthDeg: finite.min(0).max(360),
+    lossesPct: finite.min(0).max(40),
+  })
+  .strict()
 
-export const ProjectPatchSchema = z.object({
-  title: z.string().optional(),
-  baseImage: z.any().optional(),
-  siteSpec: SiteSpecSchema.partial().optional(),
-  panelSpec: PanelSpecSchema.partial().optional(),
-  geometry: z.any().optional(), // FE can store GeoJSON-like shapes here
-  results: z.any().optional(), // annualKwh, co2, assumptions, etc.
-});
+export const ProjectPanelSpecSchema = z
+  .object({
+    widthM: finite.positive().max(4),
+    heightM: finite.positive().max(4),
+    wattW: finite.positive().max(1500),
+    gapM: finite.min(0).max(1),
+  })
+  .strict()
+
+export const ProjectLayoutSummarySchema = z
+  .object({
+    dcKw: finite.nonnegative().max(20_000),
+    panelCount: z.number().int().nonnegative().max(20_000),
+    orientationDeg: finite.min(-360).max(360),
+  })
+  .strict()
+
+export const ProjectGeometrySchema = z
+  .object({
+    vertices: z.array(z.object({ x: finite, y: finite }).strict()).max(160),
+    closed: z.boolean(),
+    mPerPx: finite.positive().nullable().optional(),
+    background: z.enum(["address", "image"]),
+    zoom: finite.min(0).max(24),
+  })
+  .strict()
+
+const AssumptionValueSchema = z.union([z.string().max(200), finite, z.boolean(), z.null()])
+
+export const ProjectEstimateSchema = z
+  .object({
+    annualKwh: finite.nonnegative().max(2_000_000),
+    monthlyKwh: z.array(finite.nonnegative().max(400_000)).length(12),
+    annualCo2Kg: finite.nonnegative().max(2_000_000),
+    source: z.string().trim().max(40),
+    assumptions: z
+      .record(z.string().max(60), AssumptionValueSchema)
+      .refine((v) => Object.keys(v).length <= 40, { message: "Too many assumptions." })
+      .optional(),
+  })
+  .strict()
+
+export const ProjectNameSchema = z.string().trim().min(1).max(80)
+
+export const ProjectCreateSchema = z
+  .object({
+    name: ProjectNameSchema.optional(),
+    siteSpec: ProjectSiteSpecSchema.optional(),
+    panelSpec: ProjectPanelSpecSchema.optional(),
+  })
+  .strict()
+
+export const ProjectPatchSchema = z
+  .object({
+    name: ProjectNameSchema.optional(),
+    siteSpec: ProjectSiteSpecSchema.optional(),
+    panelSpec: ProjectPanelSpecSchema.optional(),
+    layoutSummary: ProjectLayoutSummarySchema.optional(),
+    geometry: ProjectGeometrySchema.optional(),
+    estimate: ProjectEstimateSchema.nullable().optional(),
+  })
+  .strict()
+  .refine((v) => Object.values(v).some((x) => x !== undefined), {
+    message: "At least one field must be provided.",
+  })

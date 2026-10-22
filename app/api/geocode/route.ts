@@ -1,32 +1,16 @@
 import { NextRequest } from "next/server"
+import { clamp, parseNum } from "@/lib/geo/math"
+import {
+  fetchEsriCandidates,
+  fetchEsriSuggestions,
+  fetchNominatimSearch,
+  type EsriCandidate,
+  type NominatimHit,
+} from "@/lib/geo/providers"
+import { norm, normStreet } from "@/lib/geo/street"
 import { requestClientKey, takeRateLimitToken } from "@/lib/rate-limit"
 
 export const runtime = "nodejs"
-
-type NominatimHit = {
-  place_id?: number
-  osm_type?: string
-  osm_id?: number
-  lat?: string
-  lon?: string
-  display_name?: string
-  importance?: number
-  class?: string
-  type?: string
-  address?: Record<string, unknown>
-}
-
-type EsriSuggest = {
-  text?: string
-  magicKey?: string
-  isCollection?: boolean
-}
-
-type EsriCandidate = {
-  address?: string
-  location?: { x?: number; y?: number }
-  score?: number
-}
 
 type GeocodeResult = {
   id: string
@@ -49,62 +33,26 @@ type GeocodeResult = {
   meta: { class: string | null; type: string | null; importance: number | null }
 }
 
-function clamp(n: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, n))
-}
-
-function parseNum(value: string | null) {
-  if (!value) return null
-  const n = Number(value)
-  return Number.isFinite(n) ? n : null
+function esriCandidateToResult(c: EsriCandidate): GeocodeResult | null {
+  const displayName = typeof c.address === "string" ? c.address : null
+  const lat = typeof c.location?.y === "number" ? c.location.y : NaN
+  const lng = typeof c.location?.x === "number" ? c.location.x : NaN
+  const score = typeof c.score === "number" ? c.score : NaN
+  if (!displayName || !Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(score)) return null
+  return {
+    id: `esri:${encodeURIComponent(displayName)}:${lng.toFixed(6)},${lat.toFixed(6)}`,
+    lat,
+    lng,
+    displayName,
+    score,
+    address: null,
+    meta: { class: "esri", type: "candidate", importance: null },
+  }
 }
 
 function parseStr(value: string | null) {
   const s = (value ?? "").trim()
   return s.length ? s : null
-}
-
-function norm(s: string) {
-  return s
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim()
-    .replace(/\s+/g, " ")
-}
-
-function normStreet(s: string) {
-  const tokens = norm(s).split(" ")
-  const expanded = tokens.map((t) => {
-    switch (t) {
-      case "st":
-        return "street"
-      case "rd":
-        return "road"
-      case "dr":
-        return "drive"
-      case "ave":
-        return "avenue"
-      case "blvd":
-        return "boulevard"
-      case "hwy":
-        return "highway"
-      case "pkwy":
-        return "parkway"
-      case "ln":
-        return "lane"
-      case "ct":
-        return "court"
-      case "pl":
-        return "place"
-      case "trl":
-        return "trail"
-      case "cir":
-        return "circle"
-      default:
-        return t
-    }
-  })
-  return expanded.join(" ").trim()
 }
 
 function parseHouseNumber(query: string) {
@@ -180,117 +128,7 @@ function scoreHit(query: string, hit: NominatimHit) {
   return score
 }
 
-async function fetchEsri({
-  q,
-  limit,
-  biasLat,
-  biasLng,
-  magicKey,
-  signal,
-}: {
-  q: string
-  limit: number
-  biasLat: number | null
-  biasLng: number | null
-  magicKey: string | null
-  signal: AbortSignal
-}) {
-  const url = new URL(
-    "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
-  )
-  url.searchParams.set("f", "json")
-  url.searchParams.set("singleLine", q)
-  url.searchParams.set("maxLocations", String(limit))
-  url.searchParams.set("category", "Address")
-  url.searchParams.set("countryCode", "USA")
-  if (biasLat !== null && biasLng !== null) {
-    url.searchParams.set("location", `${biasLng},${biasLat}`)
-  }
-  if (magicKey) {
-    url.searchParams.set("magicKey", magicKey)
-  }
-
-  const res = await fetch(url.toString(), {
-    signal,
-    headers: { accept: "application/json", "accept-language": "en" },
-  })
-  if (!res.ok) throw new Error(`Geocoder error (${res.status})`)
-  const data = (await res.json().catch(() => null)) as any
-  const candidates = Array.isArray(data?.candidates) ? (data.candidates as EsriCandidate[]) : []
-  return candidates
-}
-
-async function fetchEsriSuggest({
-  q,
-  limit,
-  biasLat,
-  biasLng,
-  signal,
-}: {
-  q: string
-  limit: number
-  biasLat: number | null
-  biasLng: number | null
-  signal: AbortSignal
-}) {
-  const url = new URL("https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/suggest")
-  url.searchParams.set("f", "json")
-  url.searchParams.set("text", q)
-  url.searchParams.set("maxSuggestions", String(limit))
-  url.searchParams.set("category", "Address")
-  url.searchParams.set("countryCode", "USA")
-  if (biasLat !== null && biasLng !== null) {
-    url.searchParams.set("location", `${biasLng},${biasLat}`)
-  }
-
-  const res = await fetch(url.toString(), { signal, headers: { accept: "application/json", "accept-language": "en" } })
-  if (!res.ok) throw new Error(`Geocoder error (${res.status})`)
-  const data = (await res.json().catch(() => null)) as any
-  const suggestions = Array.isArray(data?.suggestions) ? (data.suggestions as EsriSuggest[]) : []
-  return suggestions
-}
-
-async function fetchNominatim({
-  q,
-  limit,
-  biasLat,
-  biasLng,
-  signal,
-}: {
-  q: string
-  limit: number
-  biasLat: number | null
-  biasLng: number | null
-  signal: AbortSignal
-}) {
-  const url = new URL("https://nominatim.openstreetmap.org/search")
-  url.searchParams.set("format", "jsonv2")
-  url.searchParams.set("addressdetails", "1")
-  url.searchParams.set("dedupe", "1")
-  url.searchParams.set("limit", String(limit))
-  url.searchParams.set("q", q)
-
-  if (biasLat !== null && biasLng !== null) {
-    const delta = 0.5
-    const left = clamp(biasLng - delta, -180, 180)
-    const right = clamp(biasLng + delta, -180, 180)
-    const bottom = clamp(biasLat - delta, -90, 90)
-    const top = clamp(biasLat + delta, -90, 90)
-    url.searchParams.set("viewbox", `${left},${top},${right},${bottom}`)
-  }
-
-  const res = await fetch(url.toString(), {
-    signal,
-    headers: {
-      accept: "application/json",
-      "accept-language": "en",
-      "user-agent": "sunnyviewSFHacks/1.0 (geocode proxy)",
-    },
-  })
-  if (!res.ok) throw new Error(`Geocoder error (${res.status})`)
-  const data = (await res.json().catch(() => null)) as unknown
-  return Array.isArray(data) ? (data as NominatimHit[]) : []
-}
+const NOMINATIM_USER_AGENT = "sunnyviewSFHacks/1.0 (geocode proxy)"
 
 type CacheEntry = { t: number; payload: { results: GeocodeResult[]; warning: string | null } }
 const CACHE_TTL_MS = 30_000
@@ -370,7 +208,7 @@ export async function GET(req: NextRequest) {
         return Response.json(cached.payload, { status: 200 })
       }
 
-      const suggestions = await fetchEsriSuggest({ q, limit, biasLat, biasLng, signal })
+      const suggestions = await fetchEsriSuggestions({ q, limit, biasLat, biasLng, signal })
       const results: GeocodeResult[] = suggestions
         .map((s) => {
           const displayName = typeof s.text === "string" ? s.text.trim() : null
@@ -404,30 +242,13 @@ export async function GET(req: NextRequest) {
         return Response.json(cached.payload, { status: 200 })
       }
 
-      const candidates = await fetchEsri({ q, limit: 1, biasLat, biasLng, magicKey, signal })
-      const c = candidates[0]
-      const displayName = typeof c?.address === "string" ? c.address : null
-      const lat = typeof c?.location?.y === "number" ? c.location.y : NaN
-      const lng = typeof c?.location?.x === "number" ? c.location.x : NaN
-      const score = typeof c?.score === "number" ? c.score : NaN
-      if (!displayName || !Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(score)) {
+      const candidates = await fetchEsriCandidates({ q, limit: 1, biasLat, biasLng, magicKey, signal })
+      const result = candidates[0] ? esriCandidateToResult(candidates[0]) : null
+      if (!result) {
         return Response.json({ results: [], warning: "No results. Try a more specific address." }, { status: 200 })
       }
 
-      const payload = {
-        results: [
-          {
-            id: `esri:${encodeURIComponent(displayName)}:${lng.toFixed(6)},${lat.toFixed(6)}`,
-            lat,
-            lng,
-            displayName,
-            score,
-            address: null,
-            meta: { class: "esri", type: "candidate", importance: null },
-          } satisfies GeocodeResult,
-        ],
-        warning: null,
-      }
+      const payload = { results: [result], warning: null }
       cacheSet(cacheKey, payload)
       return Response.json(payload, { status: 200 })
     }
@@ -442,22 +263,10 @@ export async function GET(req: NextRequest) {
 
     // 1) Esri first (often provides rooftop-level matches for US addresses).
     try {
-      const candidates = await fetchEsri({ q, limit, biasLat, biasLng, magicKey: null, signal })
+      const candidates = await fetchEsriCandidates({ q, limit, biasLat, biasLng, magicKey: null, signal })
       for (const c of candidates) {
-        const displayName = typeof c.address === "string" ? c.address : null
-        const lat = typeof c.location?.y === "number" ? c.location.y : NaN
-        const lng = typeof c.location?.x === "number" ? c.location.x : NaN
-        const score = typeof c.score === "number" ? c.score : NaN
-        if (!displayName || !Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(score)) continue
-        results.push({
-          id: `esri:${encodeURIComponent(displayName)}:${lng.toFixed(6)},${lat.toFixed(6)}`,
-          lat,
-          lng,
-          displayName,
-          score,
-          address: null,
-          meta: { class: "esri", type: "candidate", importance: null },
-        })
+        const result = esriCandidateToResult(c)
+        if (result) results.push(result)
       }
     } catch {
       // ignore Esri failures; we'll fall back to Nominatim
@@ -465,7 +274,7 @@ export async function GET(req: NextRequest) {
 
     // 2) Nominatim fallback (and additional candidates if Esri yields none).
     if (results.length === 0) {
-      const hits = await fetchNominatim({ q, limit, biasLat, biasLng, signal })
+      const hits = await fetchNominatimSearch({ q, limit, biasLat, biasLng, signal, userAgent: NOMINATIM_USER_AGENT })
       const nomResults = hits
         .map((hit) => {
         const lat = hit.lat ? Number(hit.lat) : NaN
