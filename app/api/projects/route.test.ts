@@ -3,8 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createFakeDb } from "@/test/projects-fake-db"
 
-const mongo = vi.hoisted(() => ({ db: null as unknown }))
-vi.mock("@/lib/mongo", () => ({ getMongoDb: async () => mongo.db }))
+const mongo = vi.hoisted(() => ({ db: null as unknown, fail: null as Error | null }))
+vi.mock("@/lib/mongo", () => ({
+  getMongoDb: async () => {
+    if (mongo.fail) throw mongo.fail
+    return mongo.db
+  },
+}))
 
 import { GET as getProject, PATCH } from "@/app/api/projects/[id]/route"
 import { POST } from "@/app/api/projects/route"
@@ -55,6 +60,7 @@ beforeEach(() => {
   vi.stubEnv("TRUSTED_PROXY_HEADER", "x-forwarded-for")
   ;(globalThis as { __sunnyviewRateLimitBuckets?: Map<string, unknown> }).__sunnyviewRateLimitBuckets?.clear()
   mongo.db = createFakeDb().db
+  mongo.fail = null
   vi.spyOn(console, "error").mockImplementation(() => {})
 })
 
@@ -281,5 +287,27 @@ describe("GET /api/share/[slug]", () => {
       last = (await getShare(req("/api/share/unknownslug123", { ip: "7.7.7.7" }), slugCtx("unknownslug123"))).status
     }
     expect(last).toBe(429)
+  })
+})
+
+describe("project and share routes when MongoDB is unreachable", () => {
+  const UNAVAILABLE = "Project backend is temporarily unavailable. Please try again."
+  const ID = "0123456789abcdef01234567"
+
+  it("answer 503 with a generic message instead of crashing, and log the cause", async () => {
+    mongo.fail = new Error("bad auth : authentication failed for cluster0.example.net")
+    const responses = [
+      await POST(req("/api/projects", { method: "POST", body: { name: "Untitled", siteSpec: site, panelSpec: panel } })),
+      await getProject(req(`/api/projects/${ID}`, { visitor: OWNER }), idCtx(ID)),
+      await PATCH(req(`/api/projects/${ID}`, { method: "PATCH", body: { name: "x" }, visitor: OWNER }), idCtx(ID)),
+      await getShare(req("/api/share/abcdefghijkl"), slugCtx("abcdefghijkl")),
+    ]
+    for (const res of responses) {
+      expect(res.status).toBe(503)
+      const data = (await res.json()) as { error: string }
+      expect(data.error).toBe(UNAVAILABLE)
+      expect(data.error).not.toMatch(/auth|cluster0/)
+    }
+    expect(console.error).toHaveBeenCalled()
   })
 })
