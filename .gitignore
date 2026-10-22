@@ -31,3 +31,8 @@ CLAUDE.md
 structurizr/bin/
 structurizr/out/
 structurizr/*.zip
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
