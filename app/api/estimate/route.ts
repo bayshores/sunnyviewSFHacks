@@ -173,7 +173,10 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json(out, { status: 200 })
-  } catch {
+  } catch (e) {
+    console.warn("[estimate] pvwatts failed, using fallback", {
+      message: e instanceof Error ? e.message : String(e),
+    })
     const out = fallbackEstimate({ dcKw, lat, lng, reason: "fallback_after_pvwatts_error" })
     setMemCache(key, out, now)
     return NextResponse.json(out, { status: 200 })
