@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
+import { useState } from "react";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePackingAndEstimate } from "./use-packing-and-estimate";
 import type { PackingAndEstimateInput } from "./use-packing-and-estimate";
-import { INITIAL_ESTIMATE } from "./estimate";
+import { estimateInputsKey, INITIAL_ESTIMATE, snapshotEstimateKey } from "./estimate";
 import { roofPackingKey } from "./geometry";
 import type { Estimate } from "./types";
 
@@ -114,14 +115,18 @@ describe("usePackingAndEstimate packing", () => {
 });
 
 describe("usePackingAndEstimate estimate", () => {
-  it("installs a fallback estimate but never replaces a server one", () => {
+  it("installs a fallback estimate but keeps a server one computed for the current inputs", () => {
     const input = makeInput();
     renderHook(() => usePackingAndEstimate(input));
     const updater = vi.mocked(input.setEstimate).mock.calls[0][0] as (prev: Estimate) => Estimate;
     expect(updater(INITIAL_ESTIMATE).source).toBe("fallback");
     expect(updater(INITIAL_ESTIMATE).annualKwh).toBeGreaterThan(0);
-    const server: Estimate = { ...INITIAL_ESTIMATE, source: "server", annualKwh: 1 };
+    const key = estimateInputsKey({ lat: 37.7, lng: -122.4, tiltDeg: 20, azimuthDeg: 180, lossesPct: 14 }, 2);
+    const server: Estimate = { ...INITIAL_ESTIMATE, source: "server", annualKwh: 1, inputsKey: key };
     expect(updater(server)).toBe(server);
+    // A server estimate without a matching key is never shown.
+    expect(updater({ ...server, inputsKey: undefined }).source).toBe("fallback");
+    expect(updater({ ...server, inputsKey: "other|2" }).source).toBe("fallback");
   });
 
   it("fetches the server estimate after 320ms and applies it", async () => {
@@ -214,5 +219,83 @@ describe("usePackingAndEstimate estimate", () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("usePackingAndEstimate stale estimates", () => {
+  type Props = Omit<PackingAndEstimateInput, "setEstimate">;
+  const baseProps = (o: Partial<Props> = {}): Props => {
+    const { setEstimate: ignored, ...rest } = makeInput(o);
+    void ignored;
+    return rest;
+  };
+  const harness = (initial: Props, initialEstimate: Estimate = INITIAL_ESTIMATE) =>
+    renderHook(
+      (p: Props) => {
+        const [estimate, setEstimate] = useState<Estimate>(initialEstimate);
+        usePackingAndEstimate({ ...p, setEstimate });
+        return { estimate, setEstimate };
+      },
+      { initialProps: initial },
+    );
+  const settle = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+  it("drops address A's server estimate when the site changes to B", async () => {
+    const { result, rerender } = harness(baseProps());
+    await settle(400);
+    expect(result.current.estimate).toMatchObject({ source: "server", annualKwh: 3000, annualCo2Kg: 1200 });
+
+    // B's estimate never arrives.
+    fetchMock.mockImplementation(() => new Promise<Response>(() => {}));
+    rerender(baseProps({ lat: 40.7, lng: -74 }));
+    expect(result.current.estimate.source).toBe("fallback");
+    expect(result.current.estimate.annualKwh).not.toBe(3000);
+    await settle(400);
+    expect(result.current.estimate.source).toBe("fallback");
+  });
+
+  it("resets to zero when the site is cleared or the roof has no panels", async () => {
+    const { result, rerender } = harness(baseProps());
+    await settle(400);
+    rerender(baseProps({ lat: null, lng: null, dcKw: 0, panelCount: 0 }));
+    expect(result.current.estimate).toMatchObject({ source: "fallback", annualKwh: 0, annualCo2Kg: 0 });
+  });
+
+  it("does not apply a server response computed for the old inputs", async () => {
+    let resolveA: (r: Response) => void = () => {};
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveA = resolve;
+        }),
+    );
+    const { result, rerender } = harness(baseProps());
+    await settle(400);
+    fetchMock.mockImplementation(() => new Promise<Response>(() => {}));
+    rerender(baseProps({ lat: 40.7, lng: -74 }));
+    await act(async () => resolveA(Response.json(SERVER_BODY)));
+    await settle(400);
+    expect(result.current.estimate.source).toBe("fallback");
+  });
+
+  it("keeps a saved history estimate for its own site until a fresh server estimate arrives", () => {
+    const site = { lat: 37.7, lng: -122.4, tiltDeg: 20, azimuthDeg: 180, lossesPct: 14 };
+    const saved: Estimate = {
+      ...INITIAL_ESTIMATE,
+      source: "server",
+      annualKwh: 777,
+      annualCo2Kg: 300,
+      inputsKey: snapshotEstimateKey(site),
+    };
+    fetchMock.mockImplementation(() => new Promise<Response>(() => {}));
+    const { result, rerender } = harness(baseProps({ dcKw: 0, panelCount: 0 }), saved);
+    expect(result.current.estimate.annualKwh).toBe(777);
+    rerender(baseProps({ dcKw: 2 }));
+    expect(result.current.estimate).toMatchObject({ source: "server", annualKwh: 777 });
+    rerender(baseProps({ dcKw: 2, lat: 1, lng: 2 }));
+    expect(result.current.estimate.source).toBe("fallback");
   });
 });
