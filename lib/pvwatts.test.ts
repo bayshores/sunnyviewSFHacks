@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { callPVWatts } from "@/lib/pvwatts"
+import { PVWATTS_DEFAULT_URL, callPVWatts } from "@/lib/pvwatts"
 
 const params = { lat: 37.5, lon: -122.1, dcKw: 5, tilt: 20, azimuth: 180, losses: 14 }
 const fetchMock = vi.fn()
@@ -25,11 +25,12 @@ describe("callPVWatts", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it("builds the request URL with defaults and overrides", async () => {
+  it("builds the PVWatts v8 request URL on the NLR host with defaults and overrides", async () => {
     fetchMock.mockResolvedValue(ok({}))
     await callPVWatts(params)
     const u = new URL(fetchMock.mock.calls[0][0])
-    expect(u.origin + u.pathname).toBe("https://developer.nrel.gov/api/pvwatts/v6.json")
+    expect(u.origin + u.pathname).toBe("https://developer.nlr.gov/api/pvwatts/v8.json")
+    expect(PVWATTS_DEFAULT_URL).toBe("https://developer.nlr.gov/api/pvwatts/v8.json")
     expect(Object.fromEntries(u.searchParams)).toEqual({
       api_key: "k123", lat: "37.5", lon: "-122.1", system_capacity: "5", tilt: "20",
       azimuth: "180", losses: "14", module_type: "1", array_type: "1",
@@ -38,6 +39,47 @@ describe("callPVWatts", () => {
     const u2 = new URL(fetchMock.mock.calls[1][0])
     expect(u2.searchParams.get("module_type")).toBe("2")
     expect(u2.searchParams.get("array_type")).toBe("0")
+  })
+
+  it("uses PVWATTS_BASE_URL when set, ignoring surrounding whitespace", async () => {
+    vi.stubEnv("PVWATTS_BASE_URL", "  https://pv.example.test/api/pvwatts/v8.json  ")
+    fetchMock.mockResolvedValue(ok({}))
+    await callPVWatts(params)
+    const u = new URL(fetchMock.mock.calls[0][0])
+    expect(u.origin + u.pathname).toBe("https://pv.example.test/api/pvwatts/v8.json")
+    expect(u.searchParams.get("api_key")).toBe("k123")
+    expect(u.searchParams.get("system_capacity")).toBe("5")
+  })
+
+  it("falls back to the default URL when PVWATTS_BASE_URL is blank", async () => {
+    vi.stubEnv("PVWATTS_BASE_URL", "   ")
+    fetchMock.mockResolvedValue(ok({}))
+    await callPVWatts(params)
+    const u = new URL(fetchMock.mock.calls[0][0])
+    expect(u.origin + u.pathname).toBe(PVWATTS_DEFAULT_URL)
+  })
+
+  it.each(["not a url", "ftp://pv.example.test/v8.json", "/api/pvwatts/v8.json"])(
+    "throws without fetching when PVWATTS_BASE_URL is invalid (%s)",
+    async (bad) => {
+      vi.stubEnv("PVWATTS_BASE_URL", bad)
+      await expect(callPVWatts(params)).rejects.toThrow("Invalid PVWATTS_BASE_URL")
+      expect(fetchMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it("checks the API key before the base URL", async () => {
+    vi.stubEnv("PVWATTS_API_KEY", "")
+    vi.stubEnv("PVWATTS_BASE_URL", "not a url")
+    await expect(callPVWatts(params)).rejects.toThrow("Missing PVWATTS_API_KEY")
+  })
+
+  it("passes an abort signal and disables caching", async () => {
+    fetchMock.mockResolvedValue(ok({}))
+    await callPVWatts(params)
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init.cache).toBe("no-store")
+    expect(init.signal).toBeInstanceOf(AbortSignal)
   })
 
   it("parses 12 monthly values and annual total", async () => {
