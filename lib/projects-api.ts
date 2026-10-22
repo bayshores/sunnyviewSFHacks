@@ -36,6 +36,12 @@ function statusMessage(status: number, fallback: string): string {
   return fallback
 }
 
+async function serverErrorText(res: Response): Promise<string | null> {
+  const body = (await res.json().catch(() => null)) as { error?: unknown } | null
+  const text = typeof body?.error === "string" ? body.error.trim() : ""
+  return text.length > 0 && text.length <= 200 ? text : null
+}
+
 async function requestJson<T>(path: string, init: RequestInit, fallback: string): Promise<T> {
   let res: Response
   try {
@@ -48,7 +54,11 @@ async function requestJson<T>(path: string, init: RequestInit, fallback: string)
     throw new ProjectsApiError(NETWORK_MESSAGE, 0)
   }
 
-  if (!res.ok) throw new ProjectsApiError(statusMessage(res.status, fallback), res.status)
+  if (!res.ok) {
+    // The server distinguishes "not configured" from "temporarily unavailable" in its 503 text.
+    const serverMessage = res.status === 503 ? await serverErrorText(res) : null
+    throw new ProjectsApiError(serverMessage ?? statusMessage(res.status, fallback), res.status)
+  }
 
   const data = (await res.json().catch(() => null)) as T | null
   if (data === null || typeof data !== "object") {
