@@ -166,15 +166,17 @@ For `services/segmenter/*` changes (Python), use:
 Document any new variable in `.env.local.example` and related docs. The full list with comments lives in `.env.local.example`.
 
 Live features (server side):
-- `PVWATTS_API_KEY`: NREL PVWatts for `/api/estimate`. Missing key means fallback estimates.
+- `PVWATTS_API_KEY`: PVWatts v8 (NLR, formerly NREL; `developer.nlr.gov`) for `/api/estimate`. Missing key means fallback estimates.
 - `GEMINI_API_KEY`: `/api/panel-recommend` and `/api/gemini-validate`. Clients may send `x-gemini-api-key`.
 - `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`: `/api/tts` and `/api/elevenlabs-validate`. Clients may send `x-elevenlabs-api-key`.
 - `MONGODB_URI`, `MONGODB_DB`: History, Projects and Share (`MONGODB_DB` defaults to `sunnyview`).
 
 Optional:
+- `PVWATTS_BASE_URL`: full PVWatts JSON endpoint URL (default `https://developer.nlr.gov/api/pvwatts/v8.json`).
 - `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`: Redis cache for estimates (both required).
 - `SEGMENT_SERVICE_URL`: Python segmenter base URL. Outside production, the route probes `127.0.0.1:8000` and `localhost:8000`.
 - `SEGMENT_IMAGE_FETCH_ALLOWLIST`: comma-separated hostnames `/api/segment` may fetch images from. Private hosts are always blocked.
+- `OVERPASS_URL`: comma-separated Overpass `/api/interpreter` URLs tried before the public instances for `/api/segment` building footprints (for example a self-hosted or keyed instance). Server-only; may contain an API key.
 - `SEGMENT_SHARED_SECRET`: sent as `x-segment-secret` to the Python segmenter when set (server-only).
 - `APP_ORIGIN`: public app origin used to resolve same-origin `imageUrl` paths in `/api/segment` (default `https://$VERCEL_URL`, else `http://127.0.0.1:$PORT`). The request Host is never trusted.
 - `TRUSTED_PROXY_HEADER`: header holding the client IP for rate limiting (`x-vercel-forwarded-for` default on Vercel; otherwise unset means one shared bucket).
