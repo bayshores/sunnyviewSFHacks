@@ -50,6 +50,8 @@ describe("projects-api", () => {
 
     mockFetch(async () => json({}, 503))
     await expect(createProject({})).rejects.toThrow(/not available/i)
+    mockFetch(async () => json({ error: "Project backend is temporarily unavailable. Please try again." }, 503))
+    await expect(createProject({})).rejects.toThrow("Project backend is temporarily unavailable. Please try again.")
     mockFetch(async () => json({}, 429))
     await expect(updateProject("a", { name: "n" })).rejects.toThrow(/too many/i)
     mockFetch(async () => json({}, 413))
