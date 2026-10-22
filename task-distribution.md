@@ -1,14 +1,15 @@
 ## Team Task Distribution (Backend only)
 
-> Disclaimer (implementation status)
-> - This file is a backend implementation plan.
-> - The routes and helpers listed below are not implemented in this repository right now.
-> - make sure you treat this as an external backend checklist, not current local functionality.
+> Disclaimer (implementation status, updated 2026-10-20)
+> - This is the original hackathon backend task split. It is kept as a historical plan, not a current checklist.
+> - The "Backend 1/2/3" ownership sections and code snippets below are the plan as written. For current routes and setup, see `README.md`, `AGENTS.md` and `.env.local.example`.
 
 ### Current backend status in this repo
 
-- Implemented here: `/api/geocode`, `/api/static-map`
-- Not implemented here: `/api/projects`, `/api/estimate`, `/api/segment`, `/api/explain`, `/api/tts`, `/s/:shareSlug` JSON route
+- Implemented here: `/api/geocode`, `/api/reverse-geocode`, `/api/static-map`, `/api/forecast`, `/api/estimate`, `/api/segment`, `/api/explain` (template-based, not Gemini yet), `/api/tts`, `/api/panel-recommend` (Gemini), history routes, projects routes (`/api/projects`, `/api/projects/[id]`), and the public share route (`/api/share/[slug]`, with the `/s/[shareSlug]` page).
+- Projects and history are stored in MongoDB (`MONGODB_URI`, `MONGODB_DB`) inside this repo. There is no separate backend service.
+- Never shipped: Solana badge, Snowflake, PDF export, QR code, classroom mode, obstacle brushing.
+- The "One-Time Shared Setup" env block below is historical. Use `.env.local.example` for the current variable list.
 
 ### Backend 1
 **Owns:** Projects + DB + share links + glue
