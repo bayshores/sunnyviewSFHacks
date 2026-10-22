@@ -5,6 +5,7 @@ import { attachVisitorCookie, getOrCreateVisitorContext } from "@/lib/history-vi
 import { logHistoryDbError, mapHistoryDbError } from "@/lib/history-db-errors"
 import { deleteHistoryEntry, getHistoryEntry, patchHistoryMetadata } from "@/lib/history-store"
 import { getMongoDb } from "@/lib/mongo"
+import { readCappedJson } from "@/lib/request-guards"
 import { requestClientKey, takeRateLimitToken } from "@/lib/rate-limit"
 
 export const runtime = "nodejs"
@@ -17,6 +18,7 @@ const RATE_LIMIT_WINDOW_MS = 60_000
 const DETAIL_RATE_LIMIT_MAX = 120
 const PATCH_RATE_LIMIT_MAX = 45
 const DELETE_RATE_LIMIT_MAX = 30
+const MAX_PATCH_BODY_BYTES = 8_192
 
 const PatchBodySchema = z
   .object({
@@ -88,8 +90,11 @@ export async function PATCH(req: NextRequest, ctx: RouteContext) {
 
   const visitor = getOrCreateVisitorContext(req)
   const id = await routeId(ctx)
-  const body = await req.json().catch(() => null)
-  const parsed = PatchBodySchema.safeParse(body)
+  const capped = await readCappedJson(req, MAX_PATCH_BODY_BYTES)
+  if (!capped.ok && capped.status === 413) {
+    return withVisitorCookie({ error: "History payload is too large." }, visitor, { status: 413 })
+  }
+  const parsed = PatchBodySchema.safeParse(capped.ok ? capped.body : null)
   if (!parsed.success) {
     return withVisitorCookie({ error: "Invalid body", issues: parsed.error.issues }, visitor, { status: 400 })
   }
