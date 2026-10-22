@@ -150,7 +150,19 @@ describe("useRoofLayout applySnapshotLayout", () => {
     expect(result.current.estimate).toMatchObject({ source: "server", annualKwh: 900 });
   });
 
-  it("keeps the current estimate when the snapshot does not have 12 months", () => {
+  it("tags the saved estimate with its site so it only displays for that snapshot", () => {
+    const { result } = renderHook(() => useRoofLayout({ mPerPx: 0.1 }));
+    const snap = {
+      ...snapshot(Array.from({ length: 12 }, () => 75)),
+      lat: 1,
+      lng: 2,
+      siteSpec: { tiltDeg: 20, azimuthDeg: 180, lossesPct: 14 },
+    } as unknown as HistorySnapshot;
+    act(() => result.current.applySnapshotLayout(snap));
+    expect(result.current.estimate.inputsKey).toBe("1,2,20,180,14|*");
+  });
+
+  it("resets to the fallback when the snapshot does not have 12 months", () => {
     const { result } = renderHook(() => useRoofLayout({ mPerPx: 0.1 }));
     act(() => result.current.applySnapshotLayout(snapshot([1, 2, 3])));
     expect(result.current.estimate.source).toBe("fallback");
