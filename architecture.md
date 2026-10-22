@@ -1,13 +1,21 @@
 # sunnyview: architecture.md
 
-Last updated: 2026-02-12
+Last updated: 2026-10-20
 
 ## Implementation status disclaimer
 
-- This document mixes current architecture and planned architecture for the hackathon roadmap.
-- Implemented in this repository now: frontend experience, `GET /api/geocode`, and `GET /api/static-map`.
-- Not implemented in this repository now: `POST /api/projects`, `GET/PATCH /api/projects/:id`, `POST /api/estimate`, `POST /api/segment`, `POST /api/explain`, `POST /api/tts`, and `GET /s/:shareSlug` JSON endpoint.
-- make sure you treat those missing routes and AI/storage services as external backend dependencies.
+- This is the original hackathon architecture plan (February 2026). It is kept as a historical design reference. For the current routes, env vars and setup, see `README.md` and `AGENTS.md`.
+- Implemented in this repository now:
+  - Frontend experience, with the main flow split across `components/sunnyview/`, `components/roof-editor/` and `components/globe/`.
+  - `GET /api/geocode`, `GET /api/reverse-geocode`, `GET /api/static-map`, `GET /api/forecast`.
+  - `POST /api/estimate` (PVWatts with a built-in fallback, optional Redis cache).
+  - `POST /api/segment` (Python segmenter when configured, otherwise an in-app fallback).
+  - `POST /api/explain`, which is template-based and does not call Gemini yet (section 7.2 is still the plan).
+  - `POST /api/tts` (ElevenLabs), `POST /api/panel-recommend` (Gemini), and the key-check routes.
+  - History (`/api/history`, `/api/history/[id]`), Projects (`/api/projects`, `/api/projects/[id]`), and public share (`/api/share/[slug]` and the `/s/[shareSlug]` page).
+- MongoDB stores history and projects in this repo. The collection schemas in section 9 are the plan. The implemented fields are in `lib/history-types.ts` and `lib/projects-types.ts`. There is no separate `events` collection.
+- Never shipped (treat these as dropped ideas, not pending work): Solana badge, Snowflake/Cortex insights, PDF export, QR code for share links, classroom mode, and obstacle brushing.
+- Where the plan says "external backend" (sections 6.2 and 9), read it as this repo's own API routes and MongoDB. `NEXT_PUBLIC_API_ORIGIN` is only an optional override that points the browser at another backend.
 
 ## 0. What we are building
 
