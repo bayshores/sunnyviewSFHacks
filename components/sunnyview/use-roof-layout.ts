@@ -6,7 +6,7 @@ import type { PanelSpec, PlacedPanel, Point } from "@/components/PanelPacking";
 import type { HistorySnapshot } from "@/lib/history-types";
 import { PANEL_OPTIONS } from "@/lib/panels";
 import { polygonAreaPx2 } from "@/lib/roof-plane";
-import { INITIAL_ESTIMATE } from "./estimate";
+import { INITIAL_ESTIMATE, snapshotEstimateKey } from "./estimate";
 import type { Estimate, PanelSpecMode } from "./types";
 
 export type RoofLayout = {
@@ -128,7 +128,10 @@ export function useRoofLayout(opts: { mPerPx: number | null }): RoofLayout {
         annualCo2Kg: snapshot.estimate.annualCo2Kg,
         source: "server",
         assumptions: snapshot.estimate.assumptions,
+        inputsKey: snapshotEstimateKey({ lat: snapshot.lat, lng: snapshot.lng, ...snapshot.siteSpec }),
       });
+    } else {
+      setEstimate(INITIAL_ESTIMATE);
     }
   }, []);
 
