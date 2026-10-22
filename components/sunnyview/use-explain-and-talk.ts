@@ -4,7 +4,13 @@ import { useEffect, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { PanelSpec } from "@/components/PanelPacking";
 import { apiUrl } from "@/lib/api";
-import { DEFAULT_EXPLAIN_CAVEAT, errorFromResponse, explainTextFromResponse, summaryBullets } from "./estimate";
+import {
+  DEFAULT_EXPLAIN_CAVEAT,
+  errorFromResponse,
+  estimateInputsKey,
+  explainTextFromResponse,
+  summaryBullets,
+} from "./estimate";
 import { asRecord } from "./geometry";
 import {
   ELEVENLABS_KEY_STORAGE,
@@ -48,7 +54,14 @@ export function useExplainAndTalk(input: ExplainAndTalkInput): ExplainAndTalk {
   const { orientationDeg, panelCount, dcKw, setActionNotice } = input;
 
   const [explainLoading, setExplainLoading] = useState(false);
-  const [explainText, setExplainText] = useState<ExplainText | null>(null);
+  // Explain text is tied to the site/layout it was generated for and hidden once those change.
+  const explainKey = `${estimateInputsKey({ lat, lng, tiltDeg, azimuthDeg, lossesPct }, dcKw)}|${panelCount}|${orientationDeg}|${panelSpec.wattW}`;
+  const [explainState, setExplainState] = useState<{ key: string; text: ExplainText } | null>(null);
+  const explainText = explainState && explainState.key === explainKey ? explainState.text : null;
+  const hasSite = Number.isFinite(lat ?? NaN) && Number.isFinite(lng ?? NaN);
+  useEffect(() => {
+    if (!hasSite) setExplainState(null);
+  }, [hasSite]);
   const [ttsLoading, setTtsLoading] = useState(false);
   const [hasLocalElevenLabsKey, setHasLocalElevenLabsKey] = useState<boolean | null>(null);
 
@@ -68,6 +81,8 @@ export function useExplainAndTalk(input: ExplainAndTalkInput): ExplainAndTalk {
   }, [opened]);
 
   async function runExplain() {
+    const requestKey = explainKey;
+    const store = (text: ExplainText) => setExplainState({ key: requestKey, text });
     setExplainLoading(true);
     setActionNotice(null);
     try {
@@ -89,9 +104,9 @@ export function useExplainAndTalk(input: ExplainAndTalkInput): ExplainAndTalk {
       if (!res.ok) {
         throw new Error(errorFromResponse(data, `Explain failed (${res.status})`));
       }
-      setExplainText(explainTextFromResponse(data, { panelCount, dcKw, estimate }));
+      store(explainTextFromResponse(data, { panelCount, dcKw, estimate }));
     } catch {
-      setExplainText({
+      store({
         bullets: summaryBullets(panelCount, dcKw, estimate),
         caveat: DEFAULT_EXPLAIN_CAVEAT,
       });
