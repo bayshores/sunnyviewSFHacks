@@ -3,8 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { SNAPSHOT, SUMMARY, createHistoryFakeDb } from "@/test/history-fake-db"
 
-const mongo = vi.hoisted(() => ({ db: null as unknown }))
-vi.mock("@/lib/mongo", () => ({ getMongoDb: async () => mongo.db }))
+const mongo = vi.hoisted(() => ({ db: null as unknown, fail: null as Error | null }))
+vi.mock("@/lib/mongo", () => ({
+  getMongoDb: async () => {
+    if (mongo.fail) throw mongo.fail
+    return mongo.db
+  },
+}))
 
 import { GET as getDetail, PATCH, DELETE } from "@/app/api/history/[id]/route"
 import { GET, POST } from "@/app/api/history/route"
@@ -31,6 +36,7 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {})
   fake = createHistoryFakeDb()
   mongo.db = fake.db
+  mongo.fail = null
 })
 
 describe("GET /api/history", () => {
@@ -226,5 +232,27 @@ describe("/api/history/[id]", () => {
     let last = 0
     for (let i = 0; i < 31; i++) last = (await del("nope", { ...cookie, "x-forwarded-for": "5.5.5.5" })).status
     expect(last).toBe(429)
+  })
+})
+
+describe("history routes when MongoDB is unreachable", () => {
+  const UNAVAILABLE = "History backend is temporarily unavailable. Please try again."
+
+  it("answer 503 with a generic message instead of crashing, and log the cause", async () => {
+    mongo.fail = new Error("querySrv ENOTFOUND _mongodb._tcp.cluster0.example.net")
+    const responses = [
+      await GET(req("/api/history", { headers: cookie })),
+      await POST(req("/api/history", { method: "POST", body: good, headers: cookie })),
+      await getDetail(req(`/api/history/${HEX}`, { headers: cookie }), ctx(HEX)),
+      await PATCH(req(`/api/history/${HEX}`, { method: "PATCH", body: { pinned: true }, headers: cookie }), ctx(HEX)),
+      await DELETE(req(`/api/history/${HEX}`, { method: "DELETE", headers: cookie }), ctx(HEX)),
+    ]
+    for (const res of responses) {
+      expect(res.status).toBe(503)
+      const data = (await res.json()) as { error: string }
+      expect(data.error).toBe(UNAVAILABLE)
+      expect(data.error).not.toContain("cluster0")
+    }
+    expect(console.error).toHaveBeenCalled()
   })
 })
