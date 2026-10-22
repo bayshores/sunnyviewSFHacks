@@ -5,7 +5,12 @@ import type { Dispatch, SetStateAction } from "react";
 import { packPanelsDeterministic } from "@/components/PanelPacking";
 import type { PanelSpec, PlacedPanel, Point } from "@/components/PanelPacking";
 import { apiUrl } from "@/lib/api";
-import { fallbackEstimateFor, parseEstimateResponse } from "./estimate";
+import {
+  estimateInputsKey,
+  fallbackEstimateFor,
+  parseEstimateResponse,
+  serverEstimateIsCurrent,
+} from "./estimate";
 import { roofPackingKey } from "./geometry";
 import type { Estimate, PanelSpecMode } from "./types";
 
@@ -41,10 +46,13 @@ export function usePackingAndEstimate(input: PackingAndEstimateInput): void {
 
   const fallbackEstimate = useMemo((): Estimate => fallbackEstimateFor(dcKw), [dcKw]);
 
+  // A server estimate is only shown for the inputs it was computed for; anything else
+  // (new address, edited roof/size, changed assumptions) falls back to the local estimate.
   useEffect(() => {
     if (!panelsMounted) return;
-    setEstimate((prev) => (prev.source === "server" ? prev : fallbackEstimate));
-  }, [fallbackEstimate, panelsMounted, setEstimate]);
+    const site = { lat, lng, tiltDeg, azimuthDeg, lossesPct };
+    setEstimate((prev) => (serverEstimateIsCurrent(prev, site, dcKw) ? prev : fallbackEstimate));
+  }, [fallbackEstimate, panelsMounted, setEstimate, lat, lng, tiltDeg, azimuthDeg, lossesPct, dcKw]);
 
   useEffect(() => {
     if (!panelsMounted) return;
@@ -114,7 +122,9 @@ export function usePackingAndEstimate(input: PackingAndEstimateInput): void {
         });
         if (!res.ok) return;
         const next = parseEstimateResponse(await res.json().catch(() => null));
-        if (next) setEstimate(next);
+        if (next && !ac.signal.aborted) {
+          setEstimate({ ...next, inputsKey: estimateInputsKey({ lat, lng, tiltDeg, azimuthDeg, lossesPct }, dcKw) });
+        }
       } catch {
         // keep fallback
       }
