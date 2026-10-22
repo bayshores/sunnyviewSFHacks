@@ -161,6 +161,8 @@ export async function fetchNominatimReverse(opts: {
   signal?: AbortSignal
   userAgent: string
   extratags?: boolean
+  /** Ask for the hit's geometry (`polygon_geojson=1`), e.g. a building footprint. */
+  polygonGeojson?: boolean
 }): Promise<unknown> {
   const url = new URL(`${NOMINATIM_BASE}/reverse`)
   url.searchParams.set("format", "jsonv2")
@@ -169,6 +171,7 @@ export async function fetchNominatimReverse(opts: {
   url.searchParams.set("zoom", "18")
   url.searchParams.set("addressdetails", "1")
   if (opts.extratags) url.searchParams.set("extratags", "1")
+  if (opts.polygonGeojson) url.searchParams.set("polygon_geojson", "1")
 
   const res = await fetch(url.toString(), { signal: opts.signal, headers: nominatimHeaders(opts.userAgent) })
   if (!res.ok) throw new GeocoderHttpError(res.status)
