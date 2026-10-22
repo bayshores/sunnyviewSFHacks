@@ -6,6 +6,27 @@ export type PVWattsResult = {
 
 const PVWATTS_TIMEOUT_MS = 12_000
 
+/**
+ * PVWatts v8 JSON endpoint. NREL was renamed NLR (National Laboratory of the Rockies)
+ * in Dec 2025 and developer.nrel.gov no longer resolves. Override with PVWATTS_BASE_URL.
+ */
+export const PVWATTS_DEFAULT_URL = "https://developer.nlr.gov/api/pvwatts/v8.json"
+
+function pvwattsBaseUrl(): URL {
+  const raw = process.env.PVWATTS_BASE_URL?.trim()
+  if (!raw) return new URL(PVWATTS_DEFAULT_URL)
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new Error("Invalid PVWATTS_BASE_URL")
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("Invalid PVWATTS_BASE_URL")
+  }
+  return url
+}
+
 function num(x: unknown) {
   return typeof x === "number" && Number.isFinite(x) ? x : null
 }
@@ -23,7 +44,7 @@ export async function callPVWatts(params: {
   const key = process.env.PVWATTS_API_KEY?.trim()
   if (!key) throw new Error("Missing PVWATTS_API_KEY")
 
-  const url = new URL("https://developer.nrel.gov/api/pvwatts/v6.json")
+  const url = pvwattsBaseUrl()
   url.searchParams.set("api_key", key)
   url.searchParams.set("lat", String(params.lat))
   url.searchParams.set("lon", String(params.lon))
