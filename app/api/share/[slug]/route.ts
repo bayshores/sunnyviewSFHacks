@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
 
-import { getMongoDb } from "@/lib/mongo"
+import { connectMongo, mongoConnectMessage } from "@/lib/mongo-connect"
 import { logProjectsDbError, mapProjectsDbError } from "@/lib/projects-db-errors"
-import { PROJECTS_NOT_CONFIGURED, rateLimitResponse } from "@/lib/projects-http"
+import { rateLimitResponse } from "@/lib/projects-http"
 import { getSharedProjectBySlug } from "@/lib/projects-store"
 
 export const runtime = "nodejs"
@@ -24,10 +24,12 @@ export async function GET(req: NextRequest, ctx: RouteContext): Promise<NextResp
     return NextResponse.json({ error: "Shared project not found." }, { status: 404 })
   }
 
-  const db = await getMongoDb()
-  if (!db) {
-    return NextResponse.json({ error: PROJECTS_NOT_CONFIGURED }, { status: 503 })
+  const conn = await connectMongo()
+  if (!conn.ok) {
+    if (conn.reason === "unavailable") logProjectsDbError("share-connect", conn.error)
+    return NextResponse.json({ error: mongoConnectMessage("Project", conn.reason) }, { status: 503 })
   }
+  const db = conn.db
 
   try {
     const project = await getSharedProjectBySlug({ db, slug })
